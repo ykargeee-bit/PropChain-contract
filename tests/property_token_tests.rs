@@ -320,6 +320,420 @@ mod property_token_tests {
         let result = contract.approve(accounts.bob, 999);
         assert_eq!(result, Err(Error::TokenNotFound));
     }
+<<<<<<< HEAD
+
+    // ============================================================
+    // KYC-Based Transfer Restriction Tests
+    // ============================================================
+
+    #[ink::test]
+    fn test_set_transfer_restriction() {
+        let accounts = test::default_accounts::<DefaultEnvironment>();
+        test::set_caller::<DefaultEnvironment>(accounts.alice);
+
+        let mut contract = PropertyToken::new();
+        
+        let metadata = PropertyMetadata {
+            location: String::from("123 Main St"),
+            size: 1000,
+            legal_description: String::from("Sample property"),
+            valuation: 500000,
+            documents_url: String::from("ipfs://sample-docs"),
+        };
+        
+        let token_id = contract.register_property_with_token(metadata).unwrap();
+        
+        // Set transfer restrictions
+        let result = contract.set_transfer_restriction(
+            token_id,
+            property_token::TransferRestrictionLevel::VerificationLevelRequired,
+            property_token::KYCVerificationLevel::Standard,
+            1000, // max_transfer_amount
+            100,  // quota_period in blocks
+            10,   // hold_period in blocks
+            false, // check_risk_level
+            50,   // max_allowed_risk_level
+        );
+        assert!(result.is_ok());
+    }
+
+    #[ink::test]
+    fn test_get_transfer_restriction_config() {
+        let accounts = test::default_accounts::<DefaultEnvironment>();
+        test::set_caller::<DefaultEnvironment>(accounts.alice);
+
+        let mut contract = PropertyToken::new();
+        
+        let metadata = PropertyMetadata {
+            location: String::from("123 Main St"),
+            size: 1000,
+            legal_description: String::from("Sample property"),
+            valuation: 500000,
+            documents_url: String::from("ipfs://sample-docs"),
+        };
+        
+        let token_id = contract.register_property_with_token(metadata).unwrap();
+        
+        // Initially no restrictions
+        assert_eq!(contract.get_transfer_restriction_config(token_id), None);
+        
+        // Set restrictions
+        let result = contract.set_transfer_restriction(
+            token_id,
+            property_token::TransferRestrictionLevel::KYCRequired,
+            property_token::KYCVerificationLevel::Basic,
+            5000,
+            200,
+            20,
+            true,
+            75,
+        );
+        assert!(result.is_ok());
+        
+        // Get restrictions
+        let config = contract.get_transfer_restriction_config(token_id);
+        assert!(config.is_some());
+        
+        let (restriction_level, min_level, max_amount, quota_period, hold_period, check_risk, max_risk) = config.unwrap();
+        assert_eq!(min_level, property_token::KYCVerificationLevel::Basic);
+        assert_eq!(max_amount, 5000);
+        assert_eq!(quota_period, 200);
+        assert_eq!(hold_period, 20);
+        assert_eq!(check_risk, true);
+        assert_eq!(max_risk, 75);
+    }
+
+    #[ink::test]
+    fn test_remove_transfer_restriction() {
+        let accounts = test::default_accounts::<DefaultEnvironment>();
+        test::set_caller::<DefaultEnvironment>(accounts.alice);
+
+        let mut contract = PropertyToken::new();
+        
+        let metadata = PropertyMetadata {
+            location: String::from("123 Main St"),
+            size: 1000,
+            legal_description: String::from("Sample property"),
+            valuation: 500000,
+            documents_url: String::from("ipfs://sample-docs"),
+        };
+        
+        let token_id = contract.register_property_with_token(metadata).unwrap();
+        
+        // Set restrictions
+        let result = contract.set_transfer_restriction(
+            token_id,
+            property_token::TransferRestrictionLevel::WhitelistOnly,
+            property_token::KYCVerificationLevel::Enhanced,
+            2000,
+            150,
+            15,
+            false,
+            60,
+        );
+        assert!(result.is_ok());
+        assert!(contract.get_transfer_restriction_config(token_id).is_some());
+        
+        // Remove restrictions
+        let result = contract.remove_transfer_restriction(token_id);
+        assert!(result.is_ok());
+        assert_eq!(contract.get_transfer_restriction_config(token_id), None);
+    }
+
+    #[ink::test]
+    fn test_blacklist_and_whitelist_operations() {
+        let accounts = test::default_accounts::<DefaultEnvironment>();
+        test::set_caller::<DefaultEnvironment>(accounts.alice);
+
+        let mut contract = PropertyToken::new();
+        
+        let metadata = PropertyMetadata {
+            location: String::from("123 Main St"),
+            size: 1000,
+            legal_description: String::from("Sample property"),
+            valuation: 500000,
+            documents_url: String::from("ipfs://sample-docs"),
+        };
+        
+        let token_id = contract.register_property_with_token(metadata).unwrap();
+        
+        // Test blacklist
+        assert!(!contract.is_account_blacklisted(accounts.bob));
+        let result = contract.blacklist_account(accounts.bob);
+        assert!(result.is_ok());
+        assert!(contract.is_account_blacklisted(accounts.bob));
+        
+        // Remove from blacklist
+        let result = contract.remove_from_blacklist(accounts.bob);
+        assert!(result.is_ok());
+        assert!(!contract.is_account_blacklisted(accounts.bob));
+        
+        // Test whitelist
+        assert!(!contract.is_account_whitelisted(token_id, accounts.charlie));
+        let result = contract.whitelist_account(token_id, accounts.charlie);
+        assert!(result.is_ok());
+        assert!(contract.is_account_whitelisted(token_id, accounts.charlie));
+        
+        // Remove from whitelist
+        let result = contract.remove_from_whitelist(token_id, accounts.charlie);
+        assert!(result.is_ok());
+        assert!(!contract.is_account_whitelisted(token_id, accounts.charlie));
+    }
+
+    #[ink::test]
+    fn test_transfer_with_no_restrictions() {
+        let accounts = test::default_accounts::<DefaultEnvironment>();
+        test::set_caller::<DefaultEnvironment>(accounts.alice);
+
+        let mut contract = PropertyToken::new();
+        
+        let metadata = PropertyMetadata {
+            location: String::from("123 Main St"),
+            size: 1000,
+            legal_description: String::from("Sample property"),
+            valuation: 500000,
+            documents_url: String::from("ipfs://sample-docs"),
+        };
+        
+        let token_id = contract.register_property_with_token(metadata).unwrap();
+        
+        // Transfer should succeed without any restrictions set
+        let result = contract.transfer_from(accounts.alice, accounts.bob, token_id);
+        assert!(result.is_ok());
+        assert_eq!(contract.owner_of(token_id), Some(accounts.bob));
+    }
+
+    #[ink::test]
+    fn test_transfer_quota_tracking() {
+        let accounts = test::default_accounts::<DefaultEnvironment>();
+        test::set_caller::<DefaultEnvironment>(accounts.alice);
+
+        let mut contract = PropertyToken::new();
+        
+        let metadata = PropertyMetadata {
+            location: String::from("123 Main St"),
+            size: 1000,
+            legal_description: String::from("Sample property"),
+            valuation: 500000,
+            documents_url: String::from("ipfs://sample-docs"),
+        };
+        
+        let token_id = contract.register_property_with_token(metadata).unwrap();
+        
+        // Set transfer restrictions with quota
+        let result = contract.set_transfer_restriction(
+            token_id,
+            property_token::TransferRestrictionLevel::None,
+            property_token::KYCVerificationLevel::None,
+            100, // max_transfer_amount
+            1000, // quota_period
+            0,   // no hold period
+            false,
+            0,
+        );
+        assert!(result.is_ok());
+        
+        // Transfer and check quota
+        test::set_caller::<DefaultEnvironment>(accounts.alice);
+        let result = contract.transfer_from(accounts.alice, accounts.bob, token_id);
+        assert!(result.is_ok());
+        
+        // Check transfer quota status (returns (amount_transferred, period_start_block, acquisition_block))
+        let quota_status = contract.get_transfer_quota_status(token_id, accounts.alice);
+        assert!(quota_status.is_some());
+        let (amount_transferred, _, _) = quota_status.unwrap();
+        assert_eq!(amount_transferred, 1); // We transferred 1 share
+    }
+
+    #[ink::test]
+    fn test_blacklist_prevents_transfer() {
+        let accounts = test::default_accounts::<DefaultEnvironment>();
+        test::set_caller::<DefaultEnvironment>(accounts.alice);
+
+        let mut contract = PropertyToken::new();
+        
+        let metadata = PropertyMetadata {
+            location: String::from("123 Main St"),
+            size: 1000,
+            legal_description: String::from("Sample property"),
+            valuation: 500000,
+            documents_url: String::from("ipfs://sample-docs"),
+        };
+        
+        let token_id = contract.register_property_with_token(metadata).unwrap();
+        
+        // Blacklist bob
+        let result = contract.blacklist_account(accounts.bob);
+        assert!(result.is_ok());
+        
+        // Try to transfer to blacklisted account
+        let result = contract.transfer_from(accounts.alice, accounts.bob, token_id);
+        assert_eq!(result, Err(Error::AccountBlacklisted));
+    }
+
+    #[ink::test]
+    fn test_whitelist_only_restriction() {
+        let accounts = test::default_accounts::<DefaultEnvironment>();
+        test::set_caller::<DefaultEnvironment>(accounts.alice);
+
+        let mut contract = PropertyToken::new();
+        
+        let metadata = PropertyMetadata {
+            location: String::from("123 Main St"),
+            size: 1000,
+            legal_description: String::from("Sample property"),
+            valuation: 500000,
+            documents_url: String::from("ipfs://sample-docs"),
+        };
+        
+        let token_id = contract.register_property_with_token(metadata).unwrap();
+        
+        // Set whitelist-only restriction
+        let result = contract.set_transfer_restriction(
+            token_id,
+            property_token::TransferRestrictionLevel::WhitelistOnly,
+            property_token::KYCVerificationLevel::None,
+            0,
+            0,
+            0,
+            false,
+            0,
+        );
+        assert!(result.is_ok());
+        
+        // Whitelist alice and bob
+        let result = contract.whitelist_account(token_id, accounts.alice);
+        assert!(result.is_ok());
+        let result = contract.whitelist_account(token_id, accounts.bob);
+        assert!(result.is_ok());
+        
+        // Transfer should succeed (both are whitelisted)
+        let result = contract.transfer_from(accounts.alice, accounts.bob, token_id);
+        assert!(result.is_ok());
+    }
+
+    #[ink::test]
+    fn test_whitelist_only_rejection() {
+        let accounts = test::default_accounts::<DefaultEnvironment>();
+        test::set_caller::<DefaultEnvironment>(accounts.alice);
+
+        let mut contract = PropertyToken::new();
+        
+        let metadata = PropertyMetadata {
+            location: String::from("123 Main St"),
+            size: 1000,
+            legal_description: String::from("Sample property"),
+            valuation: 500000,
+            documents_url: String::from("ipfs://sample-docs"),
+        };
+        
+        let token_id = contract.register_property_with_token(metadata).unwrap();
+        
+        // Set whitelist-only restriction
+        let result = contract.set_transfer_restriction(
+            token_id,
+            property_token::TransferRestrictionLevel::WhitelistOnly,
+            property_token::KYCVerificationLevel::None,
+            0,
+            0,
+            0,
+            false,
+            0,
+        );
+        assert!(result.is_ok());
+        
+        // Only whitelist alice
+        let result = contract.whitelist_account(token_id, accounts.alice);
+        assert!(result.is_ok());
+        
+        // Transfer should fail (bob is not whitelisted)
+        let result = contract.transfer_from(accounts.alice, accounts.bob, token_id);
+        assert_eq!(result, Err(Error::AccountNotWhitelisted));
+    }
+
+    #[ink::test]
+    fn test_batch_transfer_with_kyc_restrictions() {
+        let accounts = test::default_accounts::<DefaultEnvironment>();
+        test::set_caller::<DefaultEnvironment>(accounts.alice);
+
+        let mut contract = PropertyToken::new();
+        
+        let metadata = PropertyMetadata {
+            location: String::from("123 Main St"),
+            size: 1000,
+            legal_description: String::from("Sample property"),
+            valuation: 500000,
+            documents_url: String::from("ipfs://sample-docs"),
+        };
+        
+        // Register multiple tokens
+        let token_id1 = contract.register_property_with_token(metadata.clone()).unwrap();
+        let token_id2 = contract.register_property_with_token(metadata).unwrap();
+        
+        // Set restrictions on both
+        for token_id in &[token_id1, token_id2] {
+            let result = contract.set_transfer_restriction(
+                *token_id,
+                property_token::TransferRestrictionLevel::None,
+                property_token::KYCVerificationLevel::None,
+                0,
+                0,
+                0,
+                false,
+                0,
+            );
+            assert!(result.is_ok());
+        }
+        
+        // Batch transfer - should succeed
+        let ids = vec![token_id1, token_id2];
+        let amounts = vec![1, 1];
+        let result = contract.safe_batch_transfer_from(
+            accounts.alice,
+            accounts.bob,
+            ids,
+            amounts,
+            vec![],
+        );
+        assert!(result.is_ok());
+    }
+
+    #[ink::test]
+    fn test_batch_transfer_with_blacklist() {
+        let accounts = test::default_accounts::<DefaultEnvironment>();
+        test::set_caller::<DefaultEnvironment>(accounts.alice);
+
+        let mut contract = PropertyToken::new();
+        
+        let metadata = PropertyMetadata {
+            location: String::from("123 Main St"),
+            size: 1000,
+            legal_description: String::from("Sample property"),
+            valuation: 500000,
+            documents_url: String::from("ipfs://sample-docs"),
+        };
+        
+        let token_id1 = contract.register_property_with_token(metadata.clone()).unwrap();
+        let token_id2 = contract.register_property_with_token(metadata).unwrap();
+        
+        // Blacklist bob
+        let result = contract.blacklist_account(accounts.bob);
+        assert!(result.is_ok());
+        
+        // Batch transfer to blacklisted account should fail
+        let ids = vec![token_id1, token_id2];
+        let amounts = vec![1, 1];
+        let result = contract.safe_batch_transfer_from(
+            accounts.alice,
+            accounts.bob,
+            ids,
+            amounts,
+            vec![],
+        );
+        assert_eq!(result, Err(Error::AccountBlacklisted));
+    }
+}
+=======
 }
 #[ink::test]
 fn test_batch_transfer_success() {
@@ -391,3 +805,4 @@ fn test_batch_transfer_unauthorized() {
     );
     assert_eq!(result, Err(Error::Unauthorized));
 }
+>>>>>>> origin/main

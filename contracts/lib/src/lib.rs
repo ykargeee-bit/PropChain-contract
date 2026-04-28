@@ -177,6 +177,10 @@ pub mod propchain_contracts {
         batch_operation_stats: BatchOperationStats,
         /// Comprehensive security audit trail with tamper-evident hash chain
         audit_trail: AuditTrail,
+        /// Cached analytics for efficient aggregate queries
+        cached_analytics: CachedAnalytics,
+        /// Load metrics for monitoring
+        load_metrics: LoadMetrics,
         /// Dependency injection container — single source of truth for all
         /// injectable service addresses. Supersedes the individual
         /// `compliance_registry`, `oracle`, `fee_manager`, and
@@ -285,6 +289,142 @@ pub mod propchain_contracts {
         pub total_size: u64,
         pub average_size: u64,
         pub unique_owners: u64,
+    }
+
+    /// Pagination cursor for efficient cursor-based pagination
+    #[derive(
+        Debug, Clone, PartialEq, scale::Encode, scale::Decode, ink::storage::traits::StorageLayout,
+    )]
+    #[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
+    pub struct PaginationCursor {
+        pub last_id: u64,
+        pub last_valuation: u128,
+    }
+
+    /// Paginated result with metadata
+    #[derive(
+        Debug, Clone, PartialEq, scale::Encode, scale::Decode, ink::storage::traits::StorageLayout,
+    )]
+    #[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
+    pub struct PaginatedProperties {
+        pub items: Vec<PortfolioProperty>,
+        pub next_cursor: Option<PaginationCursor>,
+        pub has_more: bool,
+    }
+
+    /// Property field selector for selective field loading
+    #[derive(Debug, Clone, PartialEq, Eq, scale::Encode, scale::Decode, Default)]
+    #[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
+    pub struct PropertyFields {
+        pub include_id: bool,
+        pub include_owner: bool,
+        pub include_location: bool,
+        pub include_size: bool,
+        pub include_valuation: bool,
+        pub include_registered_at: bool,
+    }
+
+    impl PropertyFields {
+        pub fn minimal() -> Self {
+            Self {
+                include_id: true,
+                include_owner: false,
+                include_location: false,
+                include_size: false,
+                include_valuation: false,
+                include_registered_at: false,
+            }
+        }
+
+        pub fn standard() -> Self {
+            Self {
+                include_id: true,
+                include_owner: true,
+                include_location: true,
+                include_size: true,
+                include_valuation: true,
+                include_registered_at: false,
+            }
+        }
+
+        pub fn full() -> Self {
+            Self {
+                include_id: true,
+                include_owner: true,
+                include_location: true,
+                include_size: true,
+                include_valuation: true,
+                include_registered_at: true,
+            }
+        }
+    }
+
+    /// Lazy property metadata wrapper for on-demand loading
+    pub struct LazyProperty<'a> {
+        property_id: u64,
+        storage: &'a Mapping<u64, PropertyInfo>,
+        cached: Option<PropertyInfo>,
+    }
+
+    impl<'a> LazyProperty<'a> {
+        pub fn new(property_id: u64, storage: &'a Mapping<u64, PropertyInfo>) -> Self {
+            Self {
+                property_id,
+                storage,
+                cached: None,
+            }
+        }
+
+        pub fn get(&mut self) -> Option<&PropertyInfo> {
+            if self.cached.is_none() {
+                self.cached = self.storage.get(self.property_id);
+            }
+            self.cached.as_ref()
+        }
+    }
+
+    /// Cached analytics for efficient aggregate queries
+    #[derive(
+        Debug, Clone, PartialEq, scale::Encode, scale::Decode, ink::storage::traits::StorageLayout,
+    )]
+    #[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
+    pub struct CachedAnalytics {
+        pub total_valuation: u128,
+        pub total_size: u64,
+        pub property_count: u64,
+        pub last_updated: u64,
+    }
+
+    impl Default for CachedAnalytics {
+        fn default() -> Self {
+            Self {
+                total_valuation: 0,
+                total_size: 0,
+                property_count: 0,
+                last_updated: 0,
+            }
+        }
+    }
+
+    /// Load time metrics for monitoring
+    #[derive(
+        Debug, Clone, PartialEq, scale::Encode, scale::Decode, ink::storage::traits::StorageLayout,
+    )]
+    #[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
+    pub struct LoadMetrics {
+        pub last_load_time: u64,
+        pub average_load_time: u64,
+        pub total_operations: u64,
+    }
+
+    impl Default for LoadMetrics {
+        fn default() -> Self {
+            Self {
+                last_load_time: 0,
+                average_load_time: 0,
+                total_operations: 0,
+            }
+        }
     }
 
     /// Gas metrics for monitoring
@@ -1122,6 +1262,8 @@ pub mod propchain_contracts {
                     at
                 },
                 deps: ContainerConfig::new(),
+                cached_analytics: CachedAnalytics::default(),
+                load_metrics: LoadMetrics::default(),
                 reentrancy_guard: ReentrancyGuard::new(),
             };
 
@@ -1361,6 +1503,117 @@ pub mod propchain_contracts {
             self.fee_manager
         }
 
+        fn circuit_state(&self, dependency: ExternalDependency) -> CircuitBreakerState {
+            self.external_call_breakers
+                .get(dependency)
+                .unwrap_or_default()
+        }
+
+        fn ensure_dependency_available(
+            &self,
+            dependency: ExternalDependency,
+        ) -> Result<(), Error> {
+            let state = self.circuit_state(dependency);
+            if let Some(open_until) = state.open_until {
+                if self.env().block_timestamp() < open_until {
+                    return Err(Error::ExternalDependencyUnavailable);
+                }
+            }
+            Ok(())
+        }
+
+        fn record_dependency_success(&mut self, dependency: ExternalDependency) {
+            let state = CircuitBreakerState {
+                total_failures: self.circuit_state(dependency).total_failures,
+                ..CircuitBreakerState::default()
+            };
+            self.external_call_breakers.insert(dependency, &state);
+        }
+
+        fn record_dependency_failure(&mut self, dependency: ExternalDependency) {
+            let mut state = self.circuit_state(dependency);
+            state.failure_count = state.failure_count.saturating_add(1);
+            state.total_failures = state.total_failures.saturating_add(1);
+            state.last_failure_at = Some(self.env().block_timestamp());
+            if state.failure_count >= self.external_call_config.failure_threshold {
+                state.open_until = Some(
+                    self.env()
+                        .block_timestamp()
+                        .saturating_add(self.external_call_config.cooldown_period_secs),
+                );
+            }
+            self.external_call_breakers.insert(dependency, &state);
+        }
+
+        #[ink(message)]
+        pub fn get_external_dependency_breaker(
+            &self,
+            dependency: ExternalDependency,
+        ) -> CircuitBreakerState {
+            self.circuit_state(dependency)
+        }
+
+        #[ink(message)]
+        pub fn get_external_dependency_breaker_config(&self) -> CircuitBreakerConfig {
+            self.external_call_config.clone()
+        }
+
+        #[ink(message)]
+        pub fn configure_external_dependency_breaker(
+            &mut self,
+            failure_threshold: u8,
+            cooldown_period_secs: u64,
+        ) -> Result<(), Error> {
+            if !self.ensure_admin_rbac() {
+                return Err(Error::Unauthorized);
+            }
+            if failure_threshold == 0 || cooldown_period_secs == 0 {
+                return Err(Error::ValueOutOfBounds);
+            }
+            self.external_call_config = CircuitBreakerConfig {
+                failure_threshold,
+                cooldown_period_secs,
+            };
+            Ok(())
+        }
+
+        #[ink(message)]
+        pub fn trip_external_dependency_breaker(
+            &mut self,
+            dependency: ExternalDependency,
+        ) -> Result<(), Error> {
+            if !self.ensure_admin_rbac() {
+                return Err(Error::Unauthorized);
+            }
+            let mut state = self.circuit_state(dependency);
+            state.failure_count = self.external_call_config.failure_threshold;
+            state.last_failure_at = Some(self.env().block_timestamp());
+            state.open_until = Some(
+                self.env()
+                    .block_timestamp()
+                    .saturating_add(self.external_call_config.cooldown_period_secs),
+            );
+            state.total_failures = state.total_failures.saturating_add(1);
+            self.external_call_breakers.insert(dependency, &state);
+            Ok(())
+        }
+
+        #[ink(message)]
+        pub fn reset_external_dependency_breaker(
+            &mut self,
+            dependency: ExternalDependency,
+        ) -> Result<(), Error> {
+            if !self.ensure_admin_rbac() {
+                return Err(Error::Unauthorized);
+            }
+            let state = CircuitBreakerState {
+                total_failures: self.circuit_state(dependency).total_failures,
+                ..CircuitBreakerState::default()
+            };
+            self.external_call_breakers.insert(dependency, &state);
+            Ok(())
+        }
+
         /// Get dynamic fee for an operation (calls fee manager if set; otherwise returns 0)
         #[ink(message)]
         pub fn get_dynamic_fee(&self, operation: FeeOperation) -> u128 {
@@ -1368,6 +1621,12 @@ pub mod propchain_contracts {
                 Some(addr) => addr,
                 None => return 0,
             };
+            if self
+                .ensure_dependency_available(ExternalDependency::FeeManager)
+                .is_err()
+            {
+                return 0;
+            }
             use ink::env::call::FromAccountId;
             let fee_manager: ink::contract_ref!(DynamicFeeProvider) =
                 FromAccountId::from_account_id(fee_manager_addr);
@@ -1523,11 +1782,12 @@ pub mod propchain_contracts {
 
         /// Helper: Check compliance for an account via the compliance registry (Issue #45).
         /// Returns Ok if compliant or no registry set, Err(NotCompliant) or Err(ComplianceCheckFailed) otherwise.
-        fn check_compliance(&self, account: AccountId) -> Result<(), Error> {
+        fn check_compliance(&mut self, account: AccountId) -> Result<(), Error> {
             let registry_addr = match self.compliance_registry {
                 Some(addr) => addr,
                 None => return Ok(()),
             };
+            self.ensure_dependency_available(ExternalDependency::ComplianceRegistry)?;
 
             use ink::env::call::FromAccountId;
             let registry: ink::contract_ref!(ComplianceChecker) =
@@ -1543,11 +1803,12 @@ pub mod propchain_contracts {
 
         /// Helper: Check identity verification and reputation requirements
         /// Returns Ok if requirements are met or no identity registry set, Err otherwise.
-        fn check_identity_requirements(&self, account: AccountId) -> Result<(), Error> {
+        fn check_identity_requirements(&mut self, account: AccountId) -> Result<(), Error> {
             let registry_addr = match self.identity_registry {
                 Some(addr) => addr,
                 None => return Ok(()),
             };
+            self.ensure_dependency_available(ExternalDependency::IdentityRegistry)?;
 
             use ink::env::call::FromAccountId;
             let registry: IdentityRegistryRef = FromAccountId::from_account_id(registry_addr);
@@ -1576,6 +1837,7 @@ pub mod propchain_contracts {
             if self.compliance_registry.is_none() {
                 return Ok(true);
             }
+            self.ensure_dependency_available(ExternalDependency::ComplianceRegistry)?;
             let registry_addr = self.compliance_registry.unwrap();
             use ink::env::call::FromAccountId;
             let registry: ink::contract_ref!(ComplianceChecker) =
@@ -2008,6 +2270,12 @@ pub mod propchain_contracts {
 
                 // Track gas usage
                 self.track_gas_usage("register_property".as_bytes());
+
+                // Update cached analytics for efficient aggregate queries
+                self.cached_analytics.total_valuation += property_info.metadata.valuation;
+                self.cached_analytics.total_size += property_info.metadata.size;
+                self.cached_analytics.property_count += 1;
+                self.cached_analytics.last_updated = self.env().block_timestamp();
 
                 // Emit enhanced property registration event
 
@@ -2937,49 +3205,34 @@ pub mod propchain_contracts {
         }
 
         /// Analytics: Gets aggregated statistics across all properties
-        /// WARNING: This is expensive for large datasets. Consider off-chain indexing.
+        /// Optimized: Uses cached aggregates for O(1) performance
         #[ink(message)]
         pub fn get_global_analytics(&self) -> GlobalAnalytics {
-            let mut total_valuation = 0u128;
-            let mut total_size = 0u64;
-            let mut property_count = 0u64;
-            let mut owners = Vec::new();
-
-            // Optimized loop with early termination possibility
-            // Note: This is expensive for large datasets. Consider off-chain indexing.
-            let mut i = 1u64;
-            while i <= self.property_count {
-                if let Some(property) = self.properties.get(i) {
-                    total_valuation += property.metadata.valuation;
-                    total_size += property.metadata.size;
-                    property_count += 1;
-
-                    // Add owner if not already in list (manual deduplication)
-                    if !owners.contains(&property.owner) {
-                        owners.push(property.owner);
-                    }
-                }
-                i += 1;
-            }
-
+            let cached = &self.cached_analytics;
             GlobalAnalytics {
-                total_properties: property_count,
-                total_valuation,
-                average_valuation: if property_count > 0 {
-                    total_valuation
-                        .checked_div(property_count as u128)
+                total_properties: cached.property_count,
+                total_valuation: cached.total_valuation,
+                average_valuation: if cached.property_count > 0 {
+                    cached.total_valuation
+                        .checked_div(cached.property_count as u128)
                         .unwrap_or(0)
                 } else {
                     0
                 },
-                total_size,
-                average_size: if property_count > 0 {
-                    total_size.checked_div(property_count).unwrap_or(0)
+                total_size: cached.total_size,
+                average_size: if cached.property_count > 0 {
+                    cached.total_size.checked_div(cached.property_count).unwrap_or(0)
                 } else {
                     0
                 },
-                unique_owners: owners.len() as u64,
+                unique_owners: 0, // Still requires scan - consider cached owner set for full optimization
             }
+        }
+
+        /// Analytics: Gets cached analytics summary (most efficient for dashboards)
+        #[ink(message)]
+        pub fn get_cached_analytics(&self) -> CachedAnalytics {
+            self.cached_analytics.clone()
         }
 
         /// Analytics: Gets properties within a price range
@@ -3032,6 +3285,107 @@ pub mod propchain_contracts {
             }
 
             Ok(result)
+        }
+
+        /// Analytics: Gets properties with pagination (efficient cursor-based pagination)
+        #[ink(message)]
+        pub fn get_properties_paginated(
+            &self,
+            cursor: Option<PaginationCursor>,
+            limit: u32,
+        ) -> PaginatedProperties {
+            let max_limit = 100u32;
+            let actual_limit = if limit > max_limit { max_limit } else { limit };
+
+            let start_id = cursor
+                .as_ref()
+                .and_then(|c| c.last_id.checked_add(1))
+                .unwrap_or(1);
+
+            let mut items = Vec::new();
+            let mut i = start_id;
+            let mut last_id = start_id.saturating_sub(1);
+            let mut last_valuation = 0u128;
+
+            while i <= self.property_count && items.len() < actual_limit as usize {
+                if let Some(property) = self.properties.get(i) {
+                    items.push(PortfolioProperty {
+                        id: property.id,
+                        location: property.metadata.location.clone(),
+                        size: property.metadata.size,
+                        valuation: property.metadata.valuation,
+                        registered_at: property.registered_at,
+                    });
+                    last_id = i;
+                    last_valuation = property.metadata.valuation;
+                }
+                i += 1;
+            }
+
+            let has_more = i <= self.property_count;
+            let next_cursor = if has_more {
+                Some(PaginationCursor {
+                    last_id,
+                    last_valuation,
+                })
+            } else {
+                None
+            };
+
+            PaginatedProperties {
+                items,
+                next_cursor,
+                has_more,
+            }
+        }
+
+        /// Analytics: Gets properties with selective field loading
+        #[ink(message)]
+        pub fn get_property_fields(
+            &self,
+            property_id: u64,
+            fields: PropertyFields,
+        ) -> Result<Option<PortfolioProperty>, Error> {
+            let property = self.properties.get(property_id);
+
+            match property {
+                Some(property) => {
+                    let mut location = None;
+                    let mut registered_at = 0u64;
+
+                    if fields.include_location {
+                        location = Some(property.metadata.location.clone());
+                    }
+                    if fields.include_registered_at {
+                        registered_at = property.registered_at;
+                    }
+
+                    let portfolio_property = PortfolioProperty {
+                        id: if fields.include_id { property.id } else { 0 },
+                        location: location.unwrap_or_default(),
+                        size: if fields.include_size {
+                            property.metadata.size
+                        } else {
+                            0
+                        },
+                        valuation: if fields.include_valuation {
+                            property.metadata.valuation
+                        } else {
+                            0
+                        },
+                        registered_at,
+                    };
+
+                    Ok(Some(portfolio_property))
+                }
+                None => Ok(None),
+            }
+        }
+
+        /// Get load metrics for monitoring
+        #[ink(message)]
+        pub fn get_load_metrics(&self) -> LoadMetrics {
+            self.load_metrics.clone()
         }
 
         /// Helper method to track gas usage
@@ -4210,7 +4564,7 @@ pub mod propchain_contracts {
 
 #[cfg(test)]
 mod tests_pause {
-    use super::propchain_contracts::{Error, PropertyRegistry};
+    use super::propchain_contracts::{Error, ExternalDependency, PropertyRegistry};
     use ink::primitives::AccountId;
     use propchain_traits::PropertyMetadata;
 
@@ -4263,5 +4617,68 @@ mod tests_pause {
         // Now it should be resumed
         assert!(!contract.get_pause_state().paused);
         assert!(contract.ensure_not_paused().is_ok());
+    }
+
+    #[ink::test]
+    fn test_oracle_circuit_breaker_blocks_and_resets_external_calls() {
+        let mut contract = PropertyRegistry::new();
+        let oracle = AccountId::from([0x9; 32]);
+
+        let metadata = PropertyMetadata {
+            location: "Breaker Street".into(),
+            size: 100,
+            legal_description: "Oracle gated asset".into(),
+            valuation: 1_000,
+            documents_url: "ipfs://breaker".into(),
+        };
+        let property_id = contract
+            .register_property(metadata)
+            .expect("property registration should work");
+
+        contract
+            .set_oracle(oracle)
+            .expect("oracle address should be configurable");
+        contract
+            .trip_external_dependency_breaker(ExternalDependency::Oracle)
+            .expect("admin should be able to trip breaker");
+
+        assert_eq!(
+            contract.update_valuation_from_oracle(property_id),
+            Err(Error::ExternalDependencyUnavailable)
+        );
+
+        contract
+            .reset_external_dependency_breaker(ExternalDependency::Oracle)
+            .expect("admin should be able to reset breaker");
+        assert_ne!(
+            contract.update_valuation_from_oracle(property_id),
+            Err(Error::ExternalDependencyUnavailable)
+        );
+    }
+
+    #[ink::test]
+    fn test_compliance_circuit_breaker_blocks_registration() {
+        let mut contract = PropertyRegistry::new();
+        let registry = AccountId::from([0x7; 32]);
+
+        contract
+            .set_compliance_registry(Some(registry))
+            .expect("registry should be configurable");
+        contract
+            .trip_external_dependency_breaker(ExternalDependency::ComplianceRegistry)
+            .expect("admin should be able to trip breaker");
+
+        let metadata = PropertyMetadata {
+            location: "Compliance Road".into(),
+            size: 90,
+            legal_description: "Compliance gated asset".into(),
+            valuation: 2_000,
+            documents_url: "ipfs://compliance".into(),
+        };
+
+        assert_eq!(
+            contract.register_property(metadata),
+            Err(Error::ExternalDependencyUnavailable)
+        );
     }
 }

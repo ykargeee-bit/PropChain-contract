@@ -268,6 +268,16 @@ pub mod property_token_codes {
     pub const PROPOSAL_CLOSED: u32 = 1023;
     pub const ASK_NOT_FOUND: u32 = 1024;
     pub const BATCH_SIZE_EXCEEDED: u32 = 1025;
+    // KYC-based transfer restriction error codes
+    pub const SENDER_NOT_VERIFIED: u32 = 1026;
+    pub const RECIPIENT_NOT_VERIFIED: u32 = 1027;
+    pub const VERIFICATION_LEVEL_INSUFFICIENT: u32 = 1028;
+    pub const TRANSFER_QUOTA_EXCEEDED: u32 = 1029;
+    pub const ACCOUNT_BLACKLISTED: u32 = 1030;
+    pub const ACCOUNT_NOT_WHITELISTED: u32 = 1031;
+    pub const HOLD_PERIOD_NOT_MET: u32 = 1032;
+    pub const SENDER_RISK_LEVEL_TOO_HIGH: u32 = 1033;
+    pub const RECIPIENT_RISK_LEVEL_TOO_HIGH: u32 = 1034;
     pub const STAKE_NOT_FOUND: u32 = 1026;
     pub const LOCK_ACTIVE: u32 = 1027;
     pub const NO_REWARDS: u32 = 1028;
@@ -292,6 +302,12 @@ pub mod escrow_codes {
     pub const ESCROW_ALREADY_FUNDED: u32 = 2012;
     pub const PARTICIPANT_NOT_FOUND: u32 = 2013;
     pub const REENTRANT_CALL: u32 = 2014;
+    // Multi-step approval error codes
+    pub const APPROVAL_REQUEST_NOT_FOUND: u32 = 2015;
+    pub const APPROVAL_REQUEST_EXPIRED: u32 = 2016;
+    pub const APPROVAL_REQUEST_ALREADY_EXECUTED: u32 = 2017;
+    pub const APPROVAL_REQUEST_CANCELLED: u32 = 2018;
+    pub const LARGE_TRANSFER_APPROVAL_REQUIRED: u32 = 2019;
 }
 
 /// Bridge error codes (3000-3999)

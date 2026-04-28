@@ -17,6 +17,16 @@ pub enum Error {
     EscrowAlreadyFunded,
     ParticipantNotFound,
     ReentrantCall,
+    /// A large-transfer approval request was not found
+    ApprovalRequestNotFound,
+    /// The large-transfer approval request has expired
+    ApprovalRequestExpired,
+    /// The large-transfer approval request was already executed
+    ApprovalRequestAlreadyExecuted,
+    /// The large-transfer approval request was cancelled
+    ApprovalRequestCancelled,
+    /// Transfer amount exceeds the large-transfer threshold and requires multi-step approval
+    LargeTransferApprovalRequired,
 }
 
 impl core::fmt::Display for Error {
@@ -36,6 +46,11 @@ impl core::fmt::Display for Error {
             Error::EscrowAlreadyFunded => write!(f, "Escrow already funded"),
             Error::ParticipantNotFound => write!(f, "Participant not found"),
             Error::ReentrantCall => write!(f, "Reentrant call"),
+            Error::ApprovalRequestNotFound => write!(f, "Large-transfer approval request not found"),
+            Error::ApprovalRequestExpired => write!(f, "Large-transfer approval request has expired"),
+            Error::ApprovalRequestAlreadyExecuted => write!(f, "Large-transfer approval request already executed"),
+            Error::ApprovalRequestCancelled => write!(f, "Large-transfer approval request was cancelled"),
+            Error::LargeTransferApprovalRequired => write!(f, "Transfer requires multi-step approval due to large amount"),
         }
     }
 }
@@ -73,6 +88,21 @@ impl ContractError for Error {
                 propchain_traits::errors::escrow_codes::PARTICIPANT_NOT_FOUND
             }
             Error::ReentrantCall => propchain_traits::errors::escrow_codes::REENTRANT_CALL,
+            Error::ApprovalRequestNotFound => {
+                propchain_traits::errors::escrow_codes::APPROVAL_REQUEST_NOT_FOUND
+            }
+            Error::ApprovalRequestExpired => {
+                propchain_traits::errors::escrow_codes::APPROVAL_REQUEST_EXPIRED
+            }
+            Error::ApprovalRequestAlreadyExecuted => {
+                propchain_traits::errors::escrow_codes::APPROVAL_REQUEST_ALREADY_EXECUTED
+            }
+            Error::ApprovalRequestCancelled => {
+                propchain_traits::errors::escrow_codes::APPROVAL_REQUEST_CANCELLED
+            }
+            Error::LargeTransferApprovalRequired => {
+                propchain_traits::errors::escrow_codes::LARGE_TRANSFER_APPROVAL_REQUIRED
+            }
         }
     }
 
@@ -94,6 +124,17 @@ impl ContractError for Error {
             Error::EscrowAlreadyFunded => "This escrow has already been funded",
             Error::ParticipantNotFound => "The specified participant is not in the escrow",
             Error::ReentrantCall => "Reentrancy guard detected a reentrant call",
+            Error::ApprovalRequestNotFound => "The large-transfer approval request does not exist",
+            Error::ApprovalRequestExpired => "The large-transfer approval request has expired",
+            Error::ApprovalRequestAlreadyExecuted => {
+                "The large-transfer approval request has already been executed"
+            }
+            Error::ApprovalRequestCancelled => {
+                "The large-transfer approval request has been cancelled"
+            }
+            Error::LargeTransferApprovalRequired => {
+                "Transfer amount exceeds the large-transfer threshold and requires multi-step approval"
+            }
         }
     }
 

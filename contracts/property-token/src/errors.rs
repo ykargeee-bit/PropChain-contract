@@ -57,6 +57,30 @@ pub enum Error {
     AskNotFound,
     /// Input batch exceeds maximum allowed size
     BatchSizeExceeded,
+
+    // KYC-based transfer restriction errors
+    /// Sender is not KYC verified
+    SenderNotVerified,
+    /// Recipient is not KYC verified
+    RecipientNotVerified,
+    /// Sender verification level insufficient
+    VerificationLevelInsufficient,
+    /// Transfer amount exceeds quota
+    TransferQuotaExceeded,
+    /// Account is blacklisted
+    AccountBlacklisted,
+    /// Account is not whitelisted
+    AccountNotWhitelisted,
+    /// Transfer hold period not met
+    HoldPeriodNotMet,
+    /// Sender risk level too high
+    SenderRiskLevelTooHigh,
+    /// Recipient risk level too high
+    RecipientRiskLevelTooHigh,
+
+    /// Token IDs and amounts vectors have different lengths
+    LengthMismatch,
+
     /// No stake found for this account and token
     StakeNotFound,
     /// Stake lock period has not yet expired
@@ -103,6 +127,19 @@ impl core::fmt::Display for Error {
             Error::ProposalClosed => write!(f, "Proposal is closed"),
             Error::AskNotFound => write!(f, "Ask not found"),
             Error::BatchSizeExceeded => write!(f, "Input batch exceeds maximum allowed size"),
+
+            Error::SenderNotVerified => write!(f, "Sender is not KYC verified"),
+            Error::RecipientNotVerified => write!(f, "Recipient is not KYC verified"),
+            Error::VerificationLevelInsufficient => write!(f, "Verification level is insufficient"),
+            Error::TransferQuotaExceeded => write!(f, "Transfer amount exceeds quota"),
+            Error::AccountBlacklisted => write!(f, "Account is blacklisted"),
+            Error::AccountNotWhitelisted => write!(f, "Account is not whitelisted"),
+            Error::HoldPeriodNotMet => write!(f, "Transfer hold period has not been met"),
+            Error::SenderRiskLevelTooHigh => write!(f, "Sender risk level is too high"),
+            Error::RecipientRiskLevelTooHigh => write!(f, "Recipient risk level is too high"),
+
+            Error::LengthMismatch => write!(f, "Token IDs and amounts length mismatch"),
+
             Error::StakeNotFound => write!(f, "Stake not found"),
             Error::LockActive => write!(f, "Stake lock period is still active"),
             Error::NoRewards => write!(f, "No staking rewards available"),
@@ -142,6 +179,19 @@ impl ContractError for Error {
             Error::ProposalClosed => property_token_codes::PROPOSAL_CLOSED,
             Error::AskNotFound => property_token_codes::ASK_NOT_FOUND,
             Error::BatchSizeExceeded => property_token_codes::BATCH_SIZE_EXCEEDED,
+
+            Error::SenderNotVerified => property_token_codes::SENDER_NOT_VERIFIED,
+            Error::RecipientNotVerified => property_token_codes::RECIPIENT_NOT_VERIFIED,
+            Error::VerificationLevelInsufficient => property_token_codes::VERIFICATION_LEVEL_INSUFFICIENT,
+            Error::TransferQuotaExceeded => property_token_codes::TRANSFER_QUOTA_EXCEEDED,
+            Error::AccountBlacklisted => property_token_codes::ACCOUNT_BLACKLISTED,
+            Error::AccountNotWhitelisted => property_token_codes::ACCOUNT_NOT_WHITELISTED,
+            Error::HoldPeriodNotMet => property_token_codes::HOLD_PERIOD_NOT_MET,
+            Error::SenderRiskLevelTooHigh => property_token_codes::SENDER_RISK_LEVEL_TOO_HIGH,
+            Error::RecipientRiskLevelTooHigh => property_token_codes::RECIPIENT_RISK_LEVEL_TOO_HIGH,
+
+            Error::LengthMismatch => property_token_codes::BATCH_SIZE_EXCEEDED,
+
             Error::StakeNotFound => property_token_codes::STAKE_NOT_FOUND,
             Error::LockActive => property_token_codes::LOCK_ACTIVE,
             Error::NoRewards => property_token_codes::NO_REWARDS,
@@ -188,6 +238,15 @@ impl ContractError for Error {
             Error::BatchSizeExceeded => {
                 "The input batch exceeds the maximum allowed size"
             }
+            Error::SenderNotVerified => "Sender account is not KYC verified",
+            Error::RecipientNotVerified => "Recipient account is not KYC verified",
+            Error::VerificationLevelInsufficient => "Account KYC verification level is insufficient for this transfer",
+            Error::TransferQuotaExceeded => "Transfer amount exceeds the daily or period quota",
+            Error::AccountBlacklisted => "The account is blacklisted and cannot participate in transfers",
+            Error::AccountNotWhitelisted => "The account is not on the whitelist for this token",
+            Error::HoldPeriodNotMet => "The minimum hold period for this token has not been met",
+            Error::SenderRiskLevelTooHigh => "Sender's risk level is too high for this transfer",
+            Error::RecipientRiskLevelTooHigh => "Recipient's risk level is too high for this transfer",
             Error::StakeNotFound => "No active stake found for this account and token",
             Error::LockActive => {
                 "The stake lock period has not yet expired; unstaking is not permitted"

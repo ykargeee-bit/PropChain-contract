@@ -12,7 +12,7 @@ pub mod tests;
 #[ink::contract]
 mod propchain_escrow {
     use super::*;
-    use propchain_contracts::{non_reentrant, ReentrancyError, ReentrancyGuard};
+    use propchain_traits::{non_reentrant, ReentrancyError, ReentrancyGuard};
 
     include!("errors.rs");
     include!("types.rs");
@@ -56,6 +56,16 @@ mod propchain_escrow {
         pending_admin_rotation: Option<propchain_traits::KeyRotationRequest>,
         /// Reentrancy protection guard
         reentrancy_guard: ReentrancyGuard,
+        /// Pending large-transfer approval requests: request_id -> LargeTransferRequest
+        large_transfer_requests: Mapping<u64, LargeTransferRequest>,
+        /// Counter for large-transfer request IDs
+        large_transfer_request_count: u64,
+        /// Index: escrow_id -> active large-transfer request_id (0 = none)
+        escrow_active_large_transfer: Mapping<u64, u64>,
+        /// Large-transfer threshold override (0 = use global constant)
+        large_transfer_threshold: u128,
+        /// Very-large-transfer threshold override (0 = use global constant)
+        very_large_transfer_threshold: u128,
     }
 
     // Events
@@ -156,6 +166,55 @@ mod propchain_escrow {
         admin: AccountId,
     }
 
+    // ── Large-Transfer Multi-Step Approval Events ────────────────────────────
+
+    /// Emitted when a large-transfer approval request is created.
+    #[ink(event)]
+    pub struct LargeTransferRequested {
+        #[ink(topic)]
+        pub request_id: u64,
+        #[ink(topic)]
+        pub escrow_id: u64,
+        pub approval_type: ApprovalType,
+        pub amount: u128,
+        pub recipient: AccountId,
+        pub required_approvals: u8,
+        pub expires_at_block: u64,
+    }
+
+    /// Emitted when an approver signs a large-transfer request.
+    #[ink(event)]
+    pub struct LargeTransferApproved {
+        #[ink(topic)]
+        pub request_id: u64,
+        #[ink(topic)]
+        pub approver: AccountId,
+        pub approvals_collected: u8,
+        pub approvals_required: u8,
+    }
+
+    /// Emitted when a large-transfer is executed after all approvals are collected.
+    #[ink(event)]
+    pub struct LargeTransferExecuted {
+        #[ink(topic)]
+        pub request_id: u64,
+        #[ink(topic)]
+        pub escrow_id: u64,
+        pub amount: u128,
+        pub recipient: AccountId,
+        pub executed_by: AccountId,
+    }
+
+    /// Emitted when a large-transfer approval request is cancelled.
+    #[ink(event)]
+    pub struct LargeTransferCancelled {
+        #[ink(topic)]
+        pub request_id: u64,
+        #[ink(topic)]
+        pub escrow_id: u64,
+        pub cancelled_by: AccountId,
+    }
+
     impl AdvancedEscrow {
         /// Constructor
         #[ink(constructor)]
@@ -176,6 +235,12 @@ mod propchain_escrow {
                 signer_public_keys: Mapping::default(),
                 pending_admin_rotation: None,
                 reentrancy_guard: ReentrancyGuard::new(),
+                large_transfer_requests: Mapping::default(),
+                large_transfer_request_count: 0,
+                escrow_active_large_transfer: Mapping::default(),
+                // 0 means "use global constant from propchain_traits::constants"
+                large_transfer_threshold: 0,
+                very_large_transfer_threshold: 0,
             }
         }
 
@@ -297,7 +362,14 @@ mod propchain_escrow {
             Ok(())
         }
 
-        /// Release funds with multi-signature approval
+        /// Release funds with multi-signature approval.
+        ///
+        /// If the escrow's deposited amount exceeds the large-transfer threshold,
+        /// this call creates a `LargeTransferRequest` and returns
+        /// `Err(Error::LargeTransferApprovalRequired)`.  Authorised signers must
+        /// then call `approve_large_transfer`, and once the required number of
+        /// approvals is collected, anyone may call `execute_large_transfer` to
+        /// finalise the transfer.
         #[ink(message)]
         pub fn release_funds(&mut self, escrow_id: u64) -> Result<(), Error> {
             non_reentrant!(self, {
@@ -333,6 +405,31 @@ mod propchain_escrow {
                     return Err(Error::SignatureThresholdNotMet);
                 }
 
+                // ── Large-transfer gate ──────────────────────────────────────
+                // If the amount exceeds the threshold, create a pending approval
+                // request instead of transferring immediately.
+                let tier = self.classify_transfer_tier(escrow.deposited_amount);
+                if !matches!(tier, TransferApprovalTier::Standard) {
+                    // Only create a new request if there isn't one already pending.
+                    if self
+                        .escrow_active_large_transfer
+                        .get(&escrow_id)
+                        .unwrap_or(0)
+                        == 0
+                    {
+                        self.create_large_transfer_request(
+                            escrow_id,
+                            ApprovalType::Release,
+                            escrow.deposited_amount,
+                            escrow.seller,
+                            tier,
+                            caller,
+                        )?;
+                    }
+                    return Err(Error::LargeTransferApprovalRequired);
+                }
+                // ── End large-transfer gate ──────────────────────────────────
+
                 // Transfer funds to seller
                 if self
                     .env()
@@ -365,7 +462,11 @@ mod propchain_escrow {
             })
         }
 
-        /// Refund funds with multi-signature approval
+        /// Refund funds with multi-signature approval.
+        ///
+        /// Same large-transfer gate as `release_funds`: amounts above the
+        /// threshold create a `LargeTransferRequest` and return
+        /// `Err(Error::LargeTransferApprovalRequired)`.
         #[ink(message)]
         pub fn refund_funds(&mut self, escrow_id: u64) -> Result<(), Error> {
             non_reentrant!(self, {
@@ -381,6 +482,28 @@ mod propchain_escrow {
                 if !self.check_signature_threshold(escrow_id, ApprovalType::Refund)? {
                     return Err(Error::SignatureThresholdNotMet);
                 }
+
+                // ── Large-transfer gate ──────────────────────────────────────
+                let tier = self.classify_transfer_tier(escrow.deposited_amount);
+                if !matches!(tier, TransferApprovalTier::Standard) {
+                    if self
+                        .escrow_active_large_transfer
+                        .get(&escrow_id)
+                        .unwrap_or(0)
+                        == 0
+                    {
+                        self.create_large_transfer_request(
+                            escrow_id,
+                            ApprovalType::Refund,
+                            escrow.deposited_amount,
+                            escrow.buyer,
+                            tier,
+                            caller,
+                        )?;
+                    }
+                    return Err(Error::LargeTransferApprovalRequired);
+                }
+                // ── End large-transfer gate ──────────────────────────────────
 
                 // Transfer funds back to buyer
                 if self
@@ -854,6 +977,288 @@ mod propchain_escrow {
             })
         }
 
+        // ── Multi-Step Approval Public Messages ─────────────────────────────
+
+        /// Approve a pending large-transfer request.
+        ///
+        /// Only authorised signers (participants listed in the escrow's
+        /// `MultiSigConfig`) may call this.  Each signer may approve at most
+        /// once.  Once the required number of approvals is reached the request
+        /// status transitions to `Approved` and `execute_large_transfer` can
+        /// be called.
+        #[ink(message)]
+        pub fn approve_large_transfer(&mut self, request_id: u64) -> Result<(), Error> {
+            let caller = self.env().caller();
+
+            let mut request = self
+                .large_transfer_requests
+                .get(&request_id)
+                .ok_or(Error::ApprovalRequestNotFound)?;
+
+            // Status checks
+            if matches!(request.status, LargeTransferStatus::Executed) {
+                return Err(Error::ApprovalRequestAlreadyExecuted);
+            }
+            if matches!(request.status, LargeTransferStatus::Cancelled) {
+                return Err(Error::ApprovalRequestCancelled);
+            }
+
+            // Expiry check
+            let current_block = u64::from(self.env().block_number());
+            if current_block > request.expires_at_block {
+                request.status = LargeTransferStatus::Expired;
+                self.large_transfer_requests.insert(&request_id, &request);
+                // Clear the active index so a new request can be created
+                self.escrow_active_large_transfer.remove(&request.escrow_id);
+                return Err(Error::ApprovalRequestExpired);
+            }
+
+            // Authorisation: caller must be a signer in the escrow's MultiSigConfig
+            let config = self
+                .multi_sig_configs
+                .get(&request.escrow_id)
+                .ok_or(Error::EscrowNotFound)?;
+            if !config.signers.contains(&caller) {
+                return Err(Error::Unauthorized);
+            }
+
+            // Duplicate approval check
+            if request.approvals.contains(&caller) {
+                return Err(Error::AlreadySigned);
+            }
+
+            // Record approval
+            request.approvals.push(caller);
+            let approvals_collected = request.approvals.len() as u8;
+
+            // Transition to Approved when threshold is met
+            if approvals_collected >= request.required_approvals {
+                request.status = LargeTransferStatus::Approved;
+            }
+
+            self.large_transfer_requests.insert(&request_id, &request);
+
+            self.add_audit_entry(
+                request.escrow_id,
+                caller,
+                "LargeTransferApproved".to_string(),
+                format!(
+                    "Request {}: {}/{} approvals",
+                    request_id, approvals_collected, request.required_approvals
+                ),
+            );
+
+            self.env().emit_event(LargeTransferApproved {
+                request_id,
+                approver: caller,
+                approvals_collected,
+                approvals_required: request.required_approvals,
+            });
+
+            Ok(())
+        }
+
+        /// Execute a large-transfer request that has collected all required approvals.
+        ///
+        /// Can be called by any participant once the request status is `Approved`.
+        /// Performs the actual on-chain transfer and updates the escrow status.
+        #[ink(message)]
+        pub fn execute_large_transfer(&mut self, request_id: u64) -> Result<(), Error> {
+            non_reentrant!(self, {
+                let caller = self.env().caller();
+
+                let request = self
+                    .large_transfer_requests
+                    .get(&request_id)
+                    .ok_or(Error::ApprovalRequestNotFound)?;
+
+                // Must be in Approved state
+                if !matches!(request.status, LargeTransferStatus::Approved) {
+                    if matches!(request.status, LargeTransferStatus::Executed) {
+                        return Err(Error::ApprovalRequestAlreadyExecuted);
+                    }
+                    if matches!(request.status, LargeTransferStatus::Cancelled) {
+                        return Err(Error::ApprovalRequestCancelled);
+                    }
+                    // Pending or Expired
+                    let current_block = u64::from(self.env().block_number());
+                    if current_block > request.expires_at_block {
+                        return Err(Error::ApprovalRequestExpired);
+                    }
+                    return Err(Error::SignatureThresholdNotMet);
+                }
+
+                // Expiry check (belt-and-suspenders)
+                let current_block = u64::from(self.env().block_number());
+                if current_block > request.expires_at_block {
+                    let mut expired = request.clone();
+                    expired.status = LargeTransferStatus::Expired;
+                    self.large_transfer_requests.insert(&request_id, &expired);
+                    self.escrow_active_large_transfer.remove(&request.escrow_id);
+                    return Err(Error::ApprovalRequestExpired);
+                }
+
+                // Caller must be a participant or admin
+                let escrow = self
+                    .escrows
+                    .get(&request.escrow_id)
+                    .ok_or(Error::EscrowNotFound)?;
+                if caller != self.admin
+                    && !escrow.participants.contains(&caller)
+                    && caller != escrow.buyer
+                    && caller != escrow.seller
+                {
+                    return Err(Error::Unauthorized);
+                }
+
+                // Perform the transfer
+                if self
+                    .env()
+                    .transfer(request.recipient, request.amount)
+                    .is_err()
+                {
+                    return Err(Error::InsufficientFunds);
+                }
+
+                // Update escrow status
+                let new_escrow_status = match request.approval_type {
+                    ApprovalType::Release => EscrowStatus::Released,
+                    ApprovalType::Refund => EscrowStatus::Refunded,
+                    ApprovalType::EmergencyOverride => EscrowStatus::Released,
+                };
+                let mut updated_escrow = escrow.clone();
+                updated_escrow.status = new_escrow_status;
+                self.escrows.insert(&request.escrow_id, &updated_escrow);
+
+                // Mark request as executed
+                let mut executed_request = request.clone();
+                executed_request.status = LargeTransferStatus::Executed;
+                self.large_transfer_requests
+                    .insert(&request_id, &executed_request);
+
+                // Clear the active index
+                self.escrow_active_large_transfer.remove(&request.escrow_id);
+
+                self.add_audit_entry(
+                    request.escrow_id,
+                    caller,
+                    "LargeTransferExecuted".to_string(),
+                    format!(
+                        "Request {}: {} transferred to {:?}",
+                        request_id, request.amount, request.recipient
+                    ),
+                );
+
+                self.env().emit_event(LargeTransferExecuted {
+                    request_id,
+                    escrow_id: request.escrow_id,
+                    amount: request.amount,
+                    recipient: request.recipient,
+                    executed_by: caller,
+                });
+
+                Ok(())
+            })
+        }
+
+        /// Cancel a pending large-transfer approval request.
+        ///
+        /// Only the initiator of the request or the admin may cancel.
+        /// Cancellation is only allowed while the request is still `Pending`
+        /// (not yet `Approved` or `Executed`).
+        #[ink(message)]
+        pub fn cancel_large_transfer(&mut self, request_id: u64) -> Result<(), Error> {
+            let caller = self.env().caller();
+
+            let mut request = self
+                .large_transfer_requests
+                .get(&request_id)
+                .ok_or(Error::ApprovalRequestNotFound)?;
+
+            if matches!(request.status, LargeTransferStatus::Executed) {
+                return Err(Error::ApprovalRequestAlreadyExecuted);
+            }
+            if matches!(request.status, LargeTransferStatus::Cancelled) {
+                return Err(Error::ApprovalRequestCancelled);
+            }
+
+            // Only initiator or admin may cancel
+            if caller != request.initiated_by && caller != self.admin {
+                return Err(Error::Unauthorized);
+            }
+
+            request.status = LargeTransferStatus::Cancelled;
+            self.large_transfer_requests.insert(&request_id, &request);
+
+            // Clear the active index so a new request can be created
+            self.escrow_active_large_transfer.remove(&request.escrow_id);
+
+            self.add_audit_entry(
+                request.escrow_id,
+                caller,
+                "LargeTransferCancelled".to_string(),
+                format!("Request {} cancelled", request_id),
+            );
+
+            self.env().emit_event(LargeTransferCancelled {
+                request_id,
+                escrow_id: request.escrow_id,
+                cancelled_by: caller,
+            });
+
+            Ok(())
+        }
+
+        /// Update the large-transfer thresholds (admin only).
+        ///
+        /// Pass `0` for either value to revert to the global constant defined
+        /// in `propchain_traits::constants`.
+        #[ink(message)]
+        pub fn set_large_transfer_thresholds(
+            &mut self,
+            large_threshold: u128,
+            very_large_threshold: u128,
+        ) -> Result<(), Error> {
+            if self.env().caller() != self.admin {
+                return Err(Error::Unauthorized);
+            }
+            // very_large must be strictly greater than large (or both zero)
+            if large_threshold > 0
+                && very_large_threshold > 0
+                && very_large_threshold <= large_threshold
+            {
+                return Err(Error::InvalidConfiguration);
+            }
+            self.large_transfer_threshold = large_threshold;
+            self.very_large_transfer_threshold = very_large_threshold;
+            Ok(())
+        }
+
+        // ── Multi-Step Approval Query Messages ──────────────────────────────
+
+        /// Get a large-transfer approval request by ID.
+        #[ink(message)]
+        pub fn get_large_transfer_request(&self, request_id: u64) -> Option<LargeTransferRequest> {
+            self.large_transfer_requests.get(&request_id)
+        }
+
+        /// Get the active large-transfer request ID for an escrow (0 = none).
+        #[ink(message)]
+        pub fn get_active_large_transfer_request(&self, escrow_id: u64) -> u64 {
+            self.escrow_active_large_transfer
+                .get(&escrow_id)
+                .unwrap_or(0)
+        }
+
+        /// Get the effective large-transfer thresholds (respects overrides).
+        #[ink(message)]
+        pub fn get_large_transfer_thresholds(&self) -> (u128, u128) {
+            (
+                self.effective_large_threshold(),
+                self.effective_very_large_threshold(),
+            )
+        }
+
         // Query functions
 
         /// Get escrow details
@@ -1032,6 +1437,109 @@ mod propchain_escrow {
         }
 
         // Helper functions
+
+        // ── Large-Transfer Helpers ───────────────────────────────────────────
+
+        /// Returns the effective large-transfer threshold, preferring the
+        /// per-contract override when set.
+        fn effective_large_threshold(&self) -> u128 {
+            if self.large_transfer_threshold > 0 {
+                self.large_transfer_threshold
+            } else {
+                propchain_traits::constants::LARGE_TRANSFER_THRESHOLD
+            }
+        }
+
+        /// Returns the effective very-large-transfer threshold.
+        fn effective_very_large_threshold(&self) -> u128 {
+            if self.very_large_transfer_threshold > 0 {
+                self.very_large_transfer_threshold
+            } else {
+                propchain_traits::constants::VERY_LARGE_TRANSFER_THRESHOLD
+            }
+        }
+
+        /// Classify an amount into a `TransferApprovalTier`.
+        fn classify_transfer_tier(&self, amount: u128) -> TransferApprovalTier {
+            if amount >= self.effective_very_large_threshold() {
+                TransferApprovalTier::VeryLarge
+            } else if amount >= self.effective_large_threshold() {
+                TransferApprovalTier::Large
+            } else {
+                TransferApprovalTier::Standard
+            }
+        }
+
+        /// Create and store a new `LargeTransferRequest`.
+        ///
+        /// Also records the request ID in `escrow_active_large_transfer` so
+        /// callers can look it up without iterating.
+        fn create_large_transfer_request(
+            &mut self,
+            escrow_id: u64,
+            approval_type: ApprovalType,
+            amount: u128,
+            recipient: AccountId,
+            tier: TransferApprovalTier,
+            initiated_by: AccountId,
+        ) -> Result<u64, Error> {
+            let required_approvals = match tier {
+                TransferApprovalTier::VeryLarge => {
+                    propchain_traits::constants::VERY_LARGE_TRANSFER_REQUIRED_APPROVALS
+                }
+                TransferApprovalTier::Large => {
+                    propchain_traits::constants::LARGE_TRANSFER_REQUIRED_APPROVALS
+                }
+                TransferApprovalTier::Standard => 1,
+            };
+
+            self.large_transfer_request_count += 1;
+            let request_id = self.large_transfer_request_count;
+            let current_block = u64::from(self.env().block_number());
+            let expires_at_block = current_block
+                .saturating_add(propchain_traits::constants::LARGE_TRANSFER_APPROVAL_EXPIRY_BLOCKS);
+
+            let request = LargeTransferRequest {
+                request_id,
+                escrow_id,
+                approval_type: approval_type.clone(),
+                amount,
+                recipient,
+                tier,
+                required_approvals,
+                approvals: Vec::new(),
+                initiated_by,
+                created_at_block: current_block,
+                expires_at_block,
+                status: LargeTransferStatus::Pending,
+            };
+
+            self.large_transfer_requests.insert(&request_id, &request);
+            self.escrow_active_large_transfer
+                .insert(&escrow_id, &request_id);
+
+            self.add_audit_entry(
+                escrow_id,
+                initiated_by,
+                "LargeTransferRequested".to_string(),
+                format!(
+                    "Request {}: amount={}, required_approvals={}, expires_at_block={}",
+                    request_id, amount, required_approvals, expires_at_block
+                ),
+            );
+
+            self.env().emit_event(LargeTransferRequested {
+                request_id,
+                escrow_id,
+                approval_type,
+                amount,
+                recipient,
+                required_approvals,
+                expires_at_block,
+            });
+
+            Ok(request_id)
+        }
 
         /// Check if signature threshold is met
         fn check_signature_threshold(

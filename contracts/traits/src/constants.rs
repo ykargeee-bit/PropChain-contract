@@ -166,6 +166,26 @@ pub const MONITORING_CRITICAL_THRESHOLD_BIPS: u32 = 2_500;
 
 /// Minimum milliseconds between repeated alert emissions for the same alert type (5 minutes).
 pub const MONITORING_ALERT_COOLDOWN_MS: u64 = 300_000;
+// ── Multi-Step Approval Constants ───────────────────────────────────────────
+
+/// Threshold above which a transfer requires 2-of-N multi-step approval.
+/// Default: 10,000 tokens at 1e12 precision = 10_000 * 1_000_000_000_000.
+pub const LARGE_TRANSFER_THRESHOLD: u128 = 10_000_000_000_000_000;
+
+/// Threshold above which a transfer requires 3-of-N multi-step approval.
+/// Default: 100,000 tokens at 1e12 precision.
+pub const VERY_LARGE_TRANSFER_THRESHOLD: u128 = 100_000_000_000_000_000;
+
+/// Number of approvals required for a "large" transfer (2-of-N).
+pub const LARGE_TRANSFER_REQUIRED_APPROVALS: u8 = 2;
+
+/// Number of approvals required for a "very large" transfer (3-of-N).
+pub const VERY_LARGE_TRANSFER_REQUIRED_APPROVALS: u8 = 3;
+
+/// Number of blocks a pending large-transfer approval request remains valid.
+/// Default: 7,200 blocks (~12 hours at 6-second block time).
+pub const LARGE_TRANSFER_APPROVAL_EXPIRY_BLOCKS: u64 = 7_200;
+
 // ── Validation Constants ────────────────────────────────────────────────────
 
 /// Maximum batch operation size to prevent DoS via gas exhaustion.

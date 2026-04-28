@@ -31,10 +31,11 @@ import type {
   Subscription,
   ClientOptions,
   TxProgressCallback,
-  TxProgressStatus,
 } from '../types';
+import { TxProgressStatus } from '../types';
 import { decodeContractError, TransactionError, GasEstimationError } from '../utils/errors';
 import { decodeTransactionEvents, subscribeToNamedEvent } from '../utils/events';
+import { withExponentialBackoff } from '../utils/connection';
 import type { PropChainEventName, PropChainEventMap } from '../types/events';
 
 export type Signer = KeyringPair | string;
@@ -610,7 +611,8 @@ export class PropertyTokenClient {
   // ==========================================================================
 
   private async query(method: string, args: unknown[]): Promise<unknown> {
-    const queryFn = this.contract.query[method];
+    return withExponentialBackoff(async () => {
+      const queryFn = this.contract.query[method];
     if (!queryFn) {
       throw new Error(`Unknown query method: ${method}`);
     }
@@ -623,7 +625,8 @@ export class PropertyTokenClient {
       throw decodeContractError(errorVariant);
     }
 
-    return output ? output.toJSON() : null;
+      return output ? output.toJSON() : null;
+    });
   }
 
   private async submitTx(
