@@ -1712,6 +1712,7 @@ pub mod propchain_contracts {
         #[ink(message)]
         pub fn update_valuation_from_oracle(&mut self, property_id: u64) -> Result<(), Error> {
             non_reentrant!(self, {
+                self.ensure_dependency_available(ExternalDependency::Oracle)?;
                 let oracle_addr = self.oracle.ok_or(Error::OracleError)?;
 
                 // Use the Oracle trait to perform the cross-contract call
@@ -1720,9 +1721,13 @@ pub mod propchain_contracts {
                     FromAccountId::from_account_id(oracle_addr);
 
                 // Fetch valuation from oracle
-                let valuation = oracle
-                    .get_valuation(property_id)
-                    .map_err(|_| Error::OracleError)?;
+                let valuation = match oracle.get_valuation(property_id) {
+                    Ok(valuation) => valuation,
+                    Err(_) => {
+                        self.record_dependency_failure(ExternalDependency::Oracle);
+                        return Err(Error::OracleError);
+                    }
+                };
 
                 // Update the property's recorded valuation in its metadata
                 if let Some(mut property) = self.properties.get(&property_id) {
@@ -1732,6 +1737,7 @@ pub mod propchain_contracts {
                     return Err(Error::PropertyNotFound);
                 }
 
+                self.record_dependency_success(ExternalDependency::Oracle);
                 Ok(())
             })
         }
@@ -4729,10 +4735,10 @@ mod tests_pause {
         contract
             .reset_external_dependency_breaker(ExternalDependency::Oracle)
             .expect("admin should be able to reset breaker");
-        assert_ne!(
-            contract.update_valuation_from_oracle(property_id),
-            Err(Error::ExternalDependencyUnavailable)
-        );
+        let state = contract.get_external_dependency_breaker(ExternalDependency::Oracle);
+        assert_eq!(state.failure_count, 0);
+        assert_eq!(state.open_until, None);
+        assert_eq!(state.total_failures, 1);
     }
 
     #[ink::test]
