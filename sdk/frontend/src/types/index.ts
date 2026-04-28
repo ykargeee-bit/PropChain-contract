@@ -905,6 +905,32 @@ export interface TxResult {
 }
 
 /**
+ * Status of a transaction in progress.
+ */
+export enum TxProgressStatus {
+  Ready = 'Ready',
+  Broadcast = 'Broadcast',
+  InBlock = 'InBlock',
+  Finalized = 'Finalized',
+  Error = 'Error',
+}
+
+/**
+ * Update payload for transaction progress.
+ */
+export interface TxStatusUpdate {
+  status: TxProgressStatus;
+  txHash?: string;
+  blockHash?: string;
+  message?: string;
+}
+
+/**
+ * Callback function type for receiving transaction progress updates.
+ */
+export type TxProgressCallback = (update: TxStatusUpdate) => void;
+
+/**
  * Generic contract event.
  */
 export interface ContractEvent {
@@ -972,7 +998,6 @@ export type {
   GovernanceProposal,
   GovernanceTokenConfig,
   VoteDelegation,
-  ProposalStatus,
 
   // Insurance Types
   InsurancePolicy,
@@ -1019,7 +1044,6 @@ export type {
   // Fees & Taxation Types
   DynamicFeeConfig,
   FeeCalculation,
-  TaxRecord,
   TaxPaymentStatus,
 
   // Property Management Types
@@ -1062,7 +1086,6 @@ export type {
   KYCInfo,
   ComplianceRegistryEntry,
   ComplianceStatus,
-  VerificationStatus,
 } from "./contracts";
 
 // Export all comprehensive event types from contract-events.ts

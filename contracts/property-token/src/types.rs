@@ -156,6 +156,93 @@ pub struct TaxRecord {
     pub proceeds: u128,
 }
 
+/// KYC verification levels
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, scale::Encode, scale::Decode, ink::storage::traits::StorageLayout,
+)]
+#[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
+pub enum KYCVerificationLevel {
+    /// No KYC verification
+    None = 0,
+    /// Basic KYC with document verification
+    Basic = 1,
+    /// Standard KYC with AML and sanctions checks
+    Standard = 2,
+    /// Enhanced KYC with biometric and risk assessment
+    Enhanced = 3,
+    /// Institutional verification with full due diligence
+    Institutional = 4,
+}
+
+/// Transfer restriction levels/types
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, scale::Encode, scale::Decode, ink::storage::traits::StorageLayout,
+)]
+#[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
+pub enum TransferRestrictionLevel {
+    /// No restrictions
+    None,
+    /// Only KYC verified users can transfer
+    KYCRequired,
+    /// Requires specific verification level
+    VerificationLevelRequired,
+    /// Whitelist only transfers
+    WhitelistOnly,
+    /// Blacklist prevents transfers
+    BlacklistBased,
+}
+
+/// Per-token transfer restrictions configuration
+#[derive(
+    Debug, Clone, Copy, scale::Encode, scale::Decode, ink::storage::traits::StorageLayout,
+)]
+#[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
+pub struct TransferRestrictionConfig {
+    /// Restriction level for this token
+    pub restriction_level: TransferRestrictionLevel,
+    /// Minimum KYC verification level required
+    pub min_verification_level: KYCVerificationLevel,
+    /// Maximum transfer amount per period (0 = unlimited)
+    pub max_transfer_amount: u128,
+    /// Period for transfer quota (in blocks)
+    pub quota_period: u32,
+    /// Minimum hold period before transfer allowed (in blocks)
+    pub hold_period: u32,
+    /// Enable risk level checking
+    pub check_risk_level: bool,
+    /// Maximum allowed risk level (0-100)
+    pub max_allowed_risk_level: u8,
+}
+
+/// User transfer quota tracking
+#[derive(
+    Debug, Clone, Copy, scale::Encode, scale::Decode, ink::storage::traits::StorageLayout,
+)]
+#[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
+pub struct UserTransferQuota {
+    /// Total amount transferred in current period
+    pub amount_transferred: u128,
+    /// Block when the current period started
+    pub period_start_block: u32,
+    /// Block when the user first acquired this token
+    pub acquisition_block: u32,
+}
+
+/// KYC transfer event for audit logging
+#[derive(
+    Debug, Clone, PartialEq, scale::Encode, scale::Decode, ink::storage::traits::StorageLayout,
+)]
+#[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
+pub struct KYCTransferEvent {
+    pub from: AccountId,
+    pub to: AccountId,
+    pub token_id: TokenId,
+    pub amount: u128,
+    pub timestamp: u64,
+    pub from_verification_level: KYCVerificationLevel,
+    pub to_verification_level: KYCVerificationLevel,
+}
+
 #[derive(
     Debug,
     Clone,
@@ -190,6 +277,7 @@ pub struct VestingSchedule {
     pub vesting_duration: u64,
 }
 
+
 /// Snapshot for governance voting (Issue #194)
 #[derive(
     Debug,
@@ -209,3 +297,66 @@ pub struct Snapshot {
     pub description: String, // Optional description of why snapshot was taken
 }
 
+
+/// Lock period for staking shares (Issue #197)
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    scale::Encode,
+    scale::Decode,
+    ink::storage::traits::StorageLayout,
+)]
+#[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
+pub enum LockPeriod {
+    Flexible,
+    ThirtyDays,
+    NinetyDays,
+    OneYear,
+}
+
+impl LockPeriod {
+    /// Returns the duration in blocks for this lock period
+    /// Assuming ~6 second block time: 1 day ≈ 14,400 blocks
+    pub fn duration_blocks(&self) -> u64 {
+        match self {
+            LockPeriod::Flexible => 0,
+            LockPeriod::ThirtyDays => 30 * 14_400,
+            LockPeriod::NinetyDays => 90 * 14_400,
+            LockPeriod::OneYear => 365 * 14_400,
+        }
+    }
+
+    /// Returns the reward multiplier for this lock period (in percentage)
+    pub fn multiplier(&self) -> u128 {
+        match self {
+            LockPeriod::Flexible => 100,      // 1x
+            LockPeriod::ThirtyDays => 110,    // 1.1x
+            LockPeriod::NinetyDays => 125,    // 1.25x
+            LockPeriod::OneYear => 150,       // 1.5x
+        }
+    }
+}
+
+/// Staking information for fractional shares (Issue #197)
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    scale::Encode,
+    scale::Decode,
+    ink::storage::traits::StorageLayout,
+)]
+#[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
+pub struct ShareStakeInfo {
+    pub staker: AccountId,
+    pub token_id: TokenId,
+    pub amount: u128,
+    pub staked_at: u64,
+    pub lock_until: u64,
+    pub lock_period: LockPeriod,
+    pub reward_debt: u128,
+}

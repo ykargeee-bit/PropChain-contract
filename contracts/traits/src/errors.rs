@@ -268,11 +268,22 @@ pub mod property_token_codes {
     pub const PROPOSAL_CLOSED: u32 = 1023;
     pub const ASK_NOT_FOUND: u32 = 1024;
     pub const BATCH_SIZE_EXCEEDED: u32 = 1025;
+    // KYC-based transfer restriction error codes
+    pub const SENDER_NOT_VERIFIED: u32 = 1026;
+    pub const RECIPIENT_NOT_VERIFIED: u32 = 1027;
+    pub const VERIFICATION_LEVEL_INSUFFICIENT: u32 = 1028;
+    pub const TRANSFER_QUOTA_EXCEEDED: u32 = 1029;
+    pub const ACCOUNT_BLACKLISTED: u32 = 1030;
+    pub const ACCOUNT_NOT_WHITELISTED: u32 = 1031;
+    pub const HOLD_PERIOD_NOT_MET: u32 = 1032;
+    pub const SENDER_RISK_LEVEL_TOO_HIGH: u32 = 1033;
+    pub const RECIPIENT_RISK_LEVEL_TOO_HIGH: u32 = 1034;
     pub const STAKE_NOT_FOUND: u32 = 1026;
     pub const LOCK_ACTIVE: u32 = 1027;
     pub const NO_REWARDS: u32 = 1028;
     pub const INSUFFICIENT_REWARD_POOL: u32 = 1029;
     pub const ALREADY_STAKED: u32 = 1030;
+    pub const REENTRANT_CALL: u32 = 1031;
 }
 
 /// Escrow error codes (2000-2999)
@@ -290,6 +301,13 @@ pub mod escrow_codes {
     pub const INVALID_CONFIGURATION: u32 = 2011;
     pub const ESCROW_ALREADY_FUNDED: u32 = 2012;
     pub const PARTICIPANT_NOT_FOUND: u32 = 2013;
+    pub const REENTRANT_CALL: u32 = 2014;
+    // Multi-step approval error codes
+    pub const APPROVAL_REQUEST_NOT_FOUND: u32 = 2015;
+    pub const APPROVAL_REQUEST_EXPIRED: u32 = 2016;
+    pub const APPROVAL_REQUEST_ALREADY_EXECUTED: u32 = 2017;
+    pub const APPROVAL_REQUEST_CANCELLED: u32 = 2018;
+    pub const LARGE_TRANSFER_APPROVAL_REQUIRED: u32 = 2019;
 }
 
 /// Bridge error codes (3000-3999)
@@ -307,6 +325,7 @@ pub mod bridge_codes {
     pub const BRIDGE_DUPLICATE_REQUEST: u32 = 3011;
     pub const BRIDGE_GAS_LIMIT_EXCEEDED: u32 = 3012;
     pub const BRIDGE_RATE_LIMIT_EXCEEDED: u32 = 3013;
+    pub const REENTRANT_CALL: u32 = 3014;
 }
 
 /// Oracle error codes (4000-4999)
@@ -340,8 +359,8 @@ pub mod fee_codes {
 /// Compliance error codes (6000-6999)
 pub mod compliance_codes {
     pub const COMPLIANCE_UNAUTHORIZED: u32 = 6001;
-    pub const COMPLIANCE_NOT_VERIFIED: u32 = 6002;
-    pub const COMPLIANCE_CHECK_FAILED: u32 = 6003;
+    pub const COMPLIANCE_CHECK_FAILED: u32 = 6002;
+    pub const COMPLIANCE_NOT_VERIFIED: u32 = 6003;
     pub const COMPLIANCE_DOCUMENT_MISSING: u32 = 6004;
     pub const COMPLIANCE_EXPIRED: u32 = 6005;
     pub const COMPLIANCE_HIGH_RISK: u32 = 6006;
@@ -352,6 +371,7 @@ pub mod compliance_codes {
     pub const COMPLIANCE_JURISDICTION_NOT_SUPPORTED: u32 = 6011;
     pub const COMPLIANCE_INVALID_DOCUMENT_TYPE: u32 = 6012;
     pub const COMPLIANCE_DATA_RETENTION_EXPIRED: u32 = 6013;
+    pub const REENTRANT_CALL: u32 = 6014;
 }
 
 /// DEX error codes (7000-7999)
@@ -371,6 +391,7 @@ pub mod dex_codes {
     pub const DEX_INVALID_BRIDGE_ROUTE: u32 = 7013;
     pub const DEX_CROSS_CHAIN_TRADE_NOT_FOUND: u32 = 7014;
     pub const DEX_INSUFFICIENT_GOVERNANCE_BALANCE: u32 = 7015;
+    pub const REENTRANT_CALL: u32 = 7016;
     pub const DEX_INVALID_REQUEST: u32 = 7016;
     pub const DEX_TIMELOCK_REQUIRED: u32 = 7016;
     pub const DEX_TIMELOCK_ACTIVE: u32 = 7017;
@@ -407,6 +428,7 @@ pub mod staking_codes {
     pub const STAKING_ALREADY_STAKED: u32 = 9008;
     pub const STAKING_INVALID_DELEGATE: u32 = 9009;
     pub const STAKING_ZERO_AMOUNT: u32 = 9010;
+    pub const REENTRANT_CALL: u32 = 9011;
 }
 
 /// Monitoring error codes (10000-10999)
@@ -426,6 +448,7 @@ pub mod event_bus_codes {
     pub const EVENT_BUS_NOT_SUBSCRIBED: u32 = 11004;
     pub const EVENT_BUS_MAX_SUBSCRIBERS_REACHED: u32 = 11005;
     pub const EVENT_BUS_SUBSCRIBER_CALL_FAILED: u32 = 11006;
+    pub const EVENT_BUS_REENTRANT_CALL: u32 = 11007;
 }
 
 #[cfg(test)]
@@ -472,6 +495,7 @@ mod tests {
             compliance_codes::COMPLIANCE_JURISDICTION_NOT_SUPPORTED,
             compliance_codes::COMPLIANCE_INVALID_DOCUMENT_TYPE,
             compliance_codes::COMPLIANCE_DATA_RETENTION_EXPIRED,
+            compliance_codes::REENTRANT_CALL,
         ];
         let len = codes.len();
         codes.sort();

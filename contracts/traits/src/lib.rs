@@ -9,10 +9,12 @@ pub mod crypto;
 pub mod di;
 pub mod errors;
 pub mod randomness;
+pub mod reentrancy_guard;
 
 pub use access_control::*;
 pub use crypto::*;
 pub use di::*;
+pub use reentrancy_guard::*;
 pub mod i18n;
 pub mod monitoring;
 
@@ -24,6 +26,7 @@ pub mod compliance;
 pub mod dex;
 pub mod event_bus;
 pub mod fee;
+pub mod multicall;
 pub mod oracle;
 pub mod property;
 
@@ -47,6 +50,7 @@ pub use property::*;
 pub use compliance::*;
 pub use event_bus::*;
 pub use fee::*;
+pub use multicall::*;
 
 #[cfg(not(feature = "std"))]
 use scale_info::prelude::vec::Vec;
