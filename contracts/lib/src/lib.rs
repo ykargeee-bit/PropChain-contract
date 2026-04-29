@@ -1581,10 +1581,7 @@ pub mod propchain_contracts {
                 .unwrap_or_default()
         }
 
-        fn ensure_dependency_available(
-            &self,
-            dependency: ExternalDependency,
-        ) -> Result<(), Error> {
+        fn ensure_dependency_available(&self, dependency: ExternalDependency) -> Result<(), Error> {
             let state = self.circuit_state(dependency);
             if let Some(open_until) = state.open_until {
                 if self.env().block_timestamp() < open_until {
@@ -4735,13 +4732,10 @@ mod tests_pause {
         contract
             .reset_external_dependency_breaker(ExternalDependency::Oracle)
             .expect("admin should be able to reset breaker");
-        
-        // After reset, the dependency should be available. We avoid calling `update_valuation_from_oracle`
-        // here because off-chain testing environment does not support actual cross-contract invocations and panics.
-        assert_eq!(
-            contract.ensure_dependency_available(ExternalDependency::Oracle),
-            Ok(())
-        );
+
+        let breaker = contract.get_external_dependency_breaker(ExternalDependency::Oracle);
+        assert_eq!(breaker.failure_count, 0);
+        assert_eq!(breaker.open_until, None);
     }
 
     #[ink::test]

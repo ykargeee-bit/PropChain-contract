@@ -45,8 +45,13 @@ mod propchain_crowdfunding {
     }
 
     #[derive(
-        Debug, Clone, Copy, PartialEq, Eq,
-        scale::Encode, scale::Decode,
+        Debug,
+        Clone,
+        Copy,
+        PartialEq,
+        Eq,
+        scale::Encode,
+        scale::Decode,
         ink::storage::traits::StorageLayout,
     )]
     #[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
@@ -59,8 +64,13 @@ mod propchain_crowdfunding {
     }
 
     #[derive(
-        Debug, Clone, Copy, PartialEq, Eq,
-        scale::Encode, scale::Decode,
+        Debug,
+        Clone,
+        Copy,
+        PartialEq,
+        Eq,
+        scale::Encode,
+        scale::Decode,
         ink::storage::traits::StorageLayout,
     )]
     #[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
@@ -71,8 +81,13 @@ mod propchain_crowdfunding {
     }
 
     #[derive(
-        Debug, Clone, Copy, PartialEq, Eq,
-        scale::Encode, scale::Decode,
+        Debug,
+        Clone,
+        Copy,
+        PartialEq,
+        Eq,
+        scale::Encode,
+        scale::Decode,
         ink::storage::traits::StorageLayout,
     )]
     #[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
@@ -83,8 +98,13 @@ mod propchain_crowdfunding {
     }
 
     #[derive(
-        Debug, Clone, Copy, PartialEq, Eq,
-        scale::Encode, scale::Decode,
+        Debug,
+        Clone,
+        Copy,
+        PartialEq,
+        Eq,
+        scale::Encode,
+        scale::Decode,
         ink::storage::traits::StorageLayout,
     )]
     #[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
@@ -95,8 +115,13 @@ mod propchain_crowdfunding {
     }
 
     #[derive(
-        Debug, Clone, Copy, PartialEq, Eq,
-        scale::Encode, scale::Decode,
+        Debug,
+        Clone,
+        Copy,
+        PartialEq,
+        Eq,
+        scale::Encode,
+        scale::Decode,
         ink::storage::traits::StorageLayout,
     )]
     #[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
@@ -108,9 +133,7 @@ mod propchain_crowdfunding {
     }
 
     #[derive(
-        Debug, Clone, PartialEq,
-        scale::Encode, scale::Decode,
-        ink::storage::traits::StorageLayout,
+        Debug, Clone, PartialEq, scale::Encode, scale::Decode, ink::storage::traits::StorageLayout,
     )]
     #[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
     pub struct Campaign {
@@ -124,9 +147,7 @@ mod propchain_crowdfunding {
     }
 
     #[derive(
-        Debug, Clone, PartialEq,
-        scale::Encode, scale::Decode,
-        ink::storage::traits::StorageLayout,
+        Debug, Clone, PartialEq, scale::Encode, scale::Decode, ink::storage::traits::StorageLayout,
     )]
     #[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
     pub struct InvestorProfile {
@@ -137,9 +158,7 @@ mod propchain_crowdfunding {
     }
 
     #[derive(
-        Debug, Clone, PartialEq,
-        scale::Encode, scale::Decode,
-        ink::storage::traits::StorageLayout,
+        Debug, Clone, PartialEq, scale::Encode, scale::Decode, ink::storage::traits::StorageLayout,
     )]
     #[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
     pub struct Milestone {
@@ -153,9 +172,7 @@ mod propchain_crowdfunding {
     }
 
     #[derive(
-        Debug, Clone, PartialEq,
-        scale::Encode, scale::Decode,
-        ink::storage::traits::StorageLayout,
+        Debug, Clone, PartialEq, scale::Encode, scale::Decode, ink::storage::traits::StorageLayout,
     )]
     #[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
     pub struct Proposal {
@@ -168,9 +185,7 @@ mod propchain_crowdfunding {
     }
 
     #[derive(
-        Debug, Clone, PartialEq,
-        scale::Encode, scale::Decode,
-        ink::storage::traits::StorageLayout,
+        Debug, Clone, PartialEq, scale::Encode, scale::Decode, ink::storage::traits::StorageLayout,
     )]
     #[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
     pub struct ShareListing {
@@ -182,9 +197,7 @@ mod propchain_crowdfunding {
     }
 
     #[derive(
-        Debug, Clone, PartialEq,
-        scale::Encode, scale::Decode,
-        ink::storage::traits::StorageLayout,
+        Debug, Clone, PartialEq, scale::Encode, scale::Decode, ink::storage::traits::StorageLayout,
     )]
     #[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
     pub struct RiskProfile {
@@ -196,12 +209,7 @@ mod propchain_crowdfunding {
     }
 
     #[derive(
-        Debug,
-        Clone,
-        PartialEq,
-        scale::Encode,
-        scale::Decode,
-        ink::storage::traits::StorageLayout,
+        Debug, Clone, PartialEq, scale::Encode, scale::Decode, ink::storage::traits::StorageLayout,
     )]
     #[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
     pub struct CampaignSuccessMetrics {
