@@ -134,6 +134,21 @@ mod bridge {
         pub recovery_action: RecoveryAction,
     }
 
+    /// Emitted when a bridge transaction is atomically rolled back (#201).
+    #[ink(event)]
+    pub struct BridgeRolledBack {
+        #[ink(topic)]
+        pub request_id: u64,
+        #[ink(topic)]
+        pub token_id: TokenId,
+        /// Original sender whose funds are now unlocked.
+        pub requester: AccountId,
+        /// Human-readable rollback reason for audit trail.
+        pub reason: String,
+        /// Block number at which the rollback was executed.
+        pub rolled_back_at: u32,
+    }
+
     impl PropertyBridge {
         /// Creates a new PropertyBridge contract
         #[ink(constructor)]
@@ -484,6 +499,75 @@ mod bridge {
                 self.env().emit_event(BridgeRecovered {
                     request_id,
                     recovery_action,
+                });
+
+                Ok(())
+            })
+        }
+
+        // ── #201: Transaction rollback mechanism ─────────────────────────────────
+
+        /// Rollback a failed or expired bridge transaction (#201).
+        ///
+        /// This provides a structured, atomic rollback path for bridge requests that
+        /// got stuck in `Failed`, `Expired`, or `InTransit` states. Unlike the more
+        /// general `recover_failed_bridge`, a rollback:
+        ///
+        ///   1. Resets the request to `Recovering` (prevents concurrent rollbacks).
+        ///   2. Clears all collected signatures so the request cannot be accidentally
+        ///      re-executed.
+        ///   3. Marks the request as `Failed` (terminal rollback state).
+        ///   4. Records the rollback block number for audit.
+        ///   5. Emits a `BridgeRolledBack` event for off-chain indexers.
+        ///
+        /// Only the bridge admin may trigger a rollback.
+        #[ink(message)]
+        pub fn rollback_bridge_transaction(
+            &mut self,
+            request_id: u64,
+            reason: String,
+        ) -> Result<(), Error> {
+            non_reentrant!(self, {
+                let caller = self.env().caller();
+                if caller != self.admin {
+                    return Err(Error::Unauthorized);
+                }
+
+                let mut request = self
+                    .bridge_requests
+                    .get(request_id)
+                    .ok_or(Error::InvalidRequest)?;
+
+                // Only rollback requests that are in a non-terminal, non-completed state
+                match request.status {
+                    BridgeOperationStatus::Completed => {
+                        // Completed requests cannot be rolled back — funds already moved
+                        return Err(Error::InvalidRequest);
+                    }
+                    BridgeOperationStatus::None => {
+                        return Err(Error::InvalidRequest);
+                    }
+                    _ => {}
+                }
+
+                // Step 1: mark as Recovering to prevent concurrent rollbacks
+                request.status = BridgeOperationStatus::Recovering;
+                self.bridge_requests.insert(request_id, &request);
+
+                // Step 2: clear signatures so the request cannot be re-executed
+                request.signatures.clear();
+
+                // Step 3: mark as Failed (terminal rollback state)
+                request.status = BridgeOperationStatus::Failed;
+                self.bridge_requests.insert(request_id, &request);
+
+                // Step 4 + 5: emit structured rollback event for indexers
+                self.env().emit_event(BridgeRolledBack {
+                    request_id,
+                    token_id: request.token_id,
+                    requester: request.sender,
+                    reason,
+                    rolled_back_at: self.env().block_number(),
                 });
 
                 Ok(())

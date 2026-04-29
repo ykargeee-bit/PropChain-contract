@@ -98,11 +98,19 @@ async fn main() -> anyhow::Result<()> {
     let api_state = ApiState { db: db.clone() };
     let schema = graphql::build_schema(db.clone());
 
-    let rest_router = Router::new()
-        .route("/health", get(health))
+    // #174: API versioning — all REST endpoints live under /api/v1/
+    // The unversioned /health and /metrics paths are preserved for infrastructure tooling.
+    let v1_router = Router::new()
         .route("/events", get(list_events))
         .route("/contracts", get(crate::api::list_contracts))
+        .route("/version", get(crate::api::api_version))
+        .with_state(api_state.clone())
+        .layer(axum::middleware::from_fn(crate::api::set_api_version_header));
+
+    let rest_router = Router::new()
+        .route("/health", get(health))
         .route("/metrics", get(|| async move { metric_handle.render() }))
+        .nest("/api/v1", v1_router)
         .with_state(api_state);
 
     let graphql_router = Router::new()

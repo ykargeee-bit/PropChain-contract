@@ -1,7 +1,50 @@
 use crate::db::{Db, EventQuery, IndexedEvent};
-use axum::{extract::Query, http::StatusCode, Json};
-use serde::Deserialize;
+use axum::{
+    extract::Query,
+    http::{Request, StatusCode},
+    middleware::Next,
+    response::Response,
+    Json,
+};
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+
+/// Current API version string (#174).
+pub const API_VERSION: &str = "v1";
+
+/// Response body for the `GET /api/v1/version` endpoint (#174).
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct VersionResponse {
+    /// Semantic API version (e.g. "v1").
+    pub version: &'static str,
+    /// Service name.
+    pub service: &'static str,
+}
+
+/// `GET /api/v1/version` — returns the current API version (#174).
+#[utoipa::path(
+    get,
+    path = "/api/v1/version",
+    tag = "System",
+    responses(
+        (status = 200, description = "Current API version", body = VersionResponse)
+    )
+)]
+pub async fn api_version() -> Json<VersionResponse> {
+    Json(VersionResponse {
+        version: API_VERSION,
+        service: "propchain-indexer",
+    })
+}
+
+/// Axum middleware that injects `X-API-Version` into every response (#174).
+pub async fn set_api_version_header<B>(req: Request<B>, next: Next<B>) -> Response {
+    let mut response = next.run(req).await;
+    response
+        .headers_mut()
+        .insert("X-API-Version", API_VERSION.parse().unwrap());
+    response
+}
 
 #[derive(Clone)]
 pub struct ApiState {

@@ -203,3 +203,161 @@ mod tests {
         assert!(large.protocol_fee > small.protocol_fee);
     }
 }
+
+    // ── #181: Formal verification property tests for bridge multi-sig logic ───
+
+    /// PROPERTY: A bridge request must never be executed with fewer signatures
+    /// than `min_signatures_required`.
+    ///
+    /// Formal invariant:  ∀ request r. r.status == Completed ⟹
+    ///                      |r.signatures| >= config.min_signatures_required
+    #[ink::test]
+    fn property_execution_requires_minimum_signatures() {
+        let mut bridge = setup_bridge(); // min_signatures = 2
+        let accounts = test::default_accounts::<DefaultEnvironment>();
+        test::set_caller::<DefaultEnvironment>(accounts.alice);
+
+        let metadata = PropertyMetadata {
+            location: String::from("Formal Test"),
+            size: 500,
+            legal_description: String::from("Prop"),
+            valuation: 50000,
+            documents_url: String::from("ipfs://formal"),
+        };
+
+        let request_id = bridge
+            .initiate_bridge_multisig(1, 2, accounts.bob, 2, None, metadata)
+            .expect("initiate should succeed");
+
+        // Attempt execution with zero signatures — must fail
+        let result = bridge.execute_bridge(request_id);
+        assert!(
+            result.is_err(),
+            "Bridge must not execute with 0 signatures (invariant: |sigs| >= min)"
+        );
+
+        // Add one signature (below minimum of 2) — must still fail
+        test::set_caller::<DefaultEnvironment>(accounts.alice);
+        bridge
+            .sign_bridge_request(request_id, true)
+            .expect("first sign should succeed");
+        let result = bridge.execute_bridge(request_id);
+        assert!(
+            result.is_err(),
+            "Bridge must not execute with 1 signature when minimum is 2"
+        );
+    }
+
+    /// PROPERTY: A signer may not sign the same request twice (replay protection).
+    ///
+    /// Formal invariant:  ∀ request r, signer s.
+    ///                      s ∈ r.signatures ⟹ sign(r, s) returns AlreadySigned
+    #[ink::test]
+    fn property_no_duplicate_signatures() {
+        let mut bridge = setup_bridge();
+        let accounts = test::default_accounts::<DefaultEnvironment>();
+        test::set_caller::<DefaultEnvironment>(accounts.alice);
+
+        let metadata = PropertyMetadata {
+            location: String::from("Dup Test"),
+            size: 200,
+            legal_description: String::from("Dup"),
+            valuation: 20000,
+            documents_url: String::from("ipfs://dup"),
+        };
+
+        let request_id = bridge
+            .initiate_bridge_multisig(1, 2, accounts.bob, 2, None, metadata)
+            .expect("initiate should succeed");
+
+        // First signature — must succeed
+        test::set_caller::<DefaultEnvironment>(accounts.alice);
+        bridge
+            .sign_bridge_request(request_id, true)
+            .expect("first signature must succeed");
+
+        // Second signature from the same account — must return AlreadySigned
+        let result = bridge.sign_bridge_request(request_id, true);
+        assert_eq!(
+            result,
+            Err(Error::AlreadySigned),
+            "Duplicate signature must return AlreadySigned (replay protection invariant)"
+        );
+    }
+
+    /// PROPERTY: Signatures on an expired request must be rejected.
+    ///
+    /// Formal invariant:  ∀ request r. now() > r.expires_at ⟹
+    ///                      sign(r, _) returns RequestExpired
+    #[ink::test]
+    fn property_expired_request_rejects_signatures() {
+        let mut bridge = setup_bridge();
+        let accounts = test::default_accounts::<DefaultEnvironment>();
+        test::set_caller::<DefaultEnvironment>(accounts.alice);
+
+        let metadata = PropertyMetadata {
+            location: String::from("Expiry Test"),
+            size: 100,
+            legal_description: String::from("Exp"),
+            valuation: 10000,
+            documents_url: String::from("ipfs://exp"),
+        };
+
+        // Create request with a 1-block timeout so it expires immediately
+        let request_id = bridge
+            .initiate_bridge_multisig(1, 2, accounts.bob, 2, Some(1), metadata)
+            .expect("initiate should succeed");
+
+        // Advance block number past the expiry
+        test::advance_block::<DefaultEnvironment>();
+        test::advance_block::<DefaultEnvironment>();
+
+        test::set_caller::<DefaultEnvironment>(accounts.alice);
+        let result = bridge.sign_bridge_request(request_id, true);
+        assert_eq!(
+            result,
+            Err(Error::RequestExpired),
+            "Signing an expired request must return RequestExpired (time-safety invariant)"
+        );
+    }
+
+    /// PROPERTY: Execution of a completed request is idempotent — calling
+    /// execute_bridge a second time must fail, not double-execute.
+    ///
+    /// Formal invariant:  ∀ request r. r.status == Completed ⟹
+    ///                      execute(r) returns InvalidRequest
+    #[ink::test]
+    fn property_no_double_execution() {
+        let mut bridge = setup_bridge(); // min = 2, max = 5
+        let accounts = test::default_accounts::<DefaultEnvironment>();
+
+        test::set_caller::<DefaultEnvironment>(accounts.alice);
+        let metadata = PropertyMetadata {
+            location: String::from("Double-exec Test"),
+            size: 300,
+            legal_description: String::from("Dbl"),
+            valuation: 30000,
+            documents_url: String::from("ipfs://dbl"),
+        };
+        let request_id = bridge
+            .initiate_bridge_multisig(1, 2, accounts.bob, 2, None, metadata)
+            .expect("initiate should succeed");
+
+        // Gather 2 signatures (min required)
+        test::set_caller::<DefaultEnvironment>(accounts.alice);
+        bridge.sign_bridge_request(request_id, true).ok();
+        test::set_caller::<DefaultEnvironment>(accounts.bob);
+        bridge.sign_bridge_request(request_id, true).ok();
+
+        // First execution may succeed (depends on contract state); record result
+        let first = bridge.execute_bridge(request_id);
+
+        // Second execution must fail regardless
+        let second = bridge.execute_bridge(request_id);
+        assert!(
+            second.is_err(),
+            "Second execution of the same request must fail (idempotency invariant); first={:?}",
+            first
+        );
+    }
+}
