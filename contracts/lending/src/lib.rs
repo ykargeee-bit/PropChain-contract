@@ -984,6 +984,7 @@ mod propchain_lending {
     }
 }
 
+pub use crate::propchain_lending::{LendingError, LoanStatus, PropertyLending};
 pub use crate::propchain_lending::{
     LendingError, LoanPortfolio, LoanStatus, PaymentSchedule, PaymentScheduleStatus,
     PropertyLending,
