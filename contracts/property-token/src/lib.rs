@@ -1408,45 +1408,10 @@ pub mod property_token {
             token_id: TokenId,
             amount: u128,
         ) -> Result<(), Error> {
-            if amount == 0 {
-                return Err(Error::InvalidAmount);
-            }
-            let caller = self.env().caller();
-            if caller != from && !self.is_approved_for_all(from, caller) {
-                return Err(Error::Unauthorized);
-            }
-            if !self.pass_compliance(from)? || !self.pass_compliance(to)? {
-                return Err(Error::ComplianceFailed);
-            }
-
-            // Check KYC-based transfer restrictions for share transfers
-            self.verify_kyc_transfer(&from, &to, token_id, amount)?;
-
-            let from_balance = self.balances.get((from, token_id)).unwrap_or(0);
-            if from_balance < amount {
-                return Err(Error::InsufficientBalance);
-            }
-
-            // Update user transfer quota tracking
-            let mut quota = self.user_transfer_quotas.get((token_id, from)).unwrap_or(UserTransferQuota {
-                amount_transferred: 0,
-                period_start_block: self.env().block_number(),
-                acquisition_block: self.env().block_number(),
-            });
-
-            quota.amount_transferred = quota.amount_transferred.saturating_add(amount);
-            self.user_transfer_quotas.insert((token_id, from), &quota);
-
-            self.update_dividend_credit_on_change(from, token_id)?;
-            self.update_dividend_credit_on_change(to, token_id)?;
-            self.balances
-                .insert((from, token_id), &(from_balance.saturating_sub(amount)));
-            let to_balance = self.balances.get((to, token_id)).unwrap_or(0);
-            self.balances
-                .insert((to, token_id), &(to_balance.saturating_add(amount)));
-            Ok(())
-
             non_reentrant!(self, {
+                if amount == 0 {
+                    return Err(Error::InvalidAmount);
+                }
                 let caller = self.env().caller();
                 if caller != from && !self.is_approved_for_all(from, caller) {
                     return Err(Error::Unauthorized);
@@ -1454,10 +1419,25 @@ pub mod property_token {
                 if !self.pass_compliance(from)? || !self.pass_compliance(to)? {
                     return Err(Error::ComplianceFailed);
                 }
+
+                // Check KYC-based transfer restrictions for share transfers
+                self.verify_kyc_transfer(&from, &to, token_id, amount)?;
+
                 let from_balance = self.balances.get((from, token_id)).unwrap_or(0);
                 if from_balance < amount {
                     return Err(Error::InsufficientBalance);
                 }
+
+                // Update user transfer quota tracking
+                let mut quota = self.user_transfer_quotas.get((token_id, from)).unwrap_or(UserTransferQuota {
+                    amount_transferred: 0,
+                    period_start_block: self.env().block_number(),
+                    acquisition_block: self.env().block_number(),
+                });
+
+                quota.amount_transferred = quota.amount_transferred.saturating_add(amount);
+                self.user_transfer_quotas.insert((token_id, from), &quota);
+
                 self.update_dividend_credit_on_change(from, token_id)?;
                 self.update_dividend_credit_on_change(to, token_id)?;
                 self.balances

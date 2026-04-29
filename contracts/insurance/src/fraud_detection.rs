@@ -244,7 +244,8 @@ mod tests {
         assert!(detected);
         assert!(score > 0);
 
-        let (detected, score) = fraud_detection::detect_anomalous_claim_amount(1_100, 1_000, 10_000);
+        let (detected, score) =
+            fraud_detection::detect_anomalous_claim_amount(1_100, 1_000, 10_000);
         assert!(!detected);
     }
 

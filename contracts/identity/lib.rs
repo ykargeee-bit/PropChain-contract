@@ -224,11 +224,11 @@ pub mod propchain_identity {
     )]
     #[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
     pub enum KycTier {
-        Tier0Unverified,    // No KYC, basic access only
-        Tier1Basic,         // Basic identity verification
-        Tier2Standard,      // Standard KYC with document verification
-        Tier3Enhanced,      // Enhanced due diligence
-        Tier4Premium,       // Premium verification with full background check
+        Tier0Unverified, // No KYC, basic access only
+        Tier1Basic,      // Basic identity verification
+        Tier2Standard,   // Standard KYC with document verification
+        Tier3Enhanced,   // Enhanced due diligence
+        Tier4Premium,    // Premium verification with full background check
     }
 
     /// KYC Tier privileges

@@ -1,6 +1,6 @@
 use propchain_factory::builder::DeploymentBuilder;
 /// Example: Deploy a PropertyToken using the factory
-/// 
+///
 /// This example demonstrates how to:
 /// 1. Initialize the factory
 /// 2. Set code hashes

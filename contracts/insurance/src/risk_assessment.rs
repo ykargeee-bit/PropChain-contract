@@ -44,21 +44,18 @@ pub mod risk_model {
     /// Newer properties are safer
     pub fn calculate_age_risk_score(property_age_years: u32) -> u32 {
         match property_age_years {
-            0..=5 => 150,      // Very new - low risk
-            6..=15 => 300,     // Modern
-            16..=30 => 500,    // Medium age
-            31..=50 => 700,    // Older
-            51..=100 => 850,   // Much older
-            _ => 900,          // Very old
+            0..=5 => 150,    // Very new - low risk
+            6..=15 => 300,   // Modern
+            16..=30 => 500,  // Medium age
+            31..=50 => 700,  // Older
+            51..=100 => 850, // Much older
+            _ => 900,        // Very old
         }
     }
 
     /// Calculate ownership risk score based on owner experience
     /// More experienced owners = lower risk
-    pub fn calculate_ownership_risk_score(
-        owner_age_years: u32,
-        years_as_owner: u32,
-    ) -> u32 {
+    pub fn calculate_ownership_risk_score(owner_age_years: u32, years_as_owner: u32) -> u32 {
         // Ownership stability score
         let stability_score = if years_as_owner > 10 {
             100
@@ -154,7 +151,7 @@ pub mod risk_model {
         claims_score: u32,
         safety_score: u32,
     ) -> u32 {
-        // Weighted average: location 20%, construction 20%, age 15%, 
+        // Weighted average: location 20%, construction 20%, age 15%,
         // ownership 15%, claims 20%, safety 10%
         (location_score * 200
             + construction_score * 200
@@ -205,22 +202,34 @@ mod tests {
 
     #[test]
     fn test_location_risk_score() {
-        assert_eq!(risk_model::calculate_location_risk_score("premium_safe_zone"), 100);
-        assert_eq!(risk_model::calculate_location_risk_score("high_risk_zone"), 800);
+        assert_eq!(
+            risk_model::calculate_location_risk_score("premium_safe_zone"),
+            100
+        );
+        assert_eq!(
+            risk_model::calculate_location_risk_score("high_risk_zone"),
+            800
+        );
         assert_eq!(risk_model::calculate_location_risk_score("unknown"), 500);
     }
 
     #[test]
     fn test_construction_risk_score() {
-        assert_eq!(risk_model::calculate_construction_risk_score("steel_frame"), 250);
-        assert_eq!(risk_model::calculate_construction_risk_score("wood_frame"), 750);
+        assert_eq!(
+            risk_model::calculate_construction_risk_score("steel_frame"),
+            250
+        );
+        assert_eq!(
+            risk_model::calculate_construction_risk_score("wood_frame"),
+            750
+        );
     }
 
     #[test]
     fn test_age_risk_score() {
-        assert_eq!(risk_model::calculate_age_risk_score(3), 150);    // Very new
-        assert_eq!(risk_model::calculate_age_risk_score(25), 500);   // Medium
-        assert_eq!(risk_model::calculate_age_risk_score(80), 850);   // Much older
+        assert_eq!(risk_model::calculate_age_risk_score(3), 150); // Very new
+        assert_eq!(risk_model::calculate_age_risk_score(25), 500); // Medium
+        assert_eq!(risk_model::calculate_age_risk_score(80), 850); // Much older
     }
 
     #[test]
@@ -247,9 +256,9 @@ mod tests {
 
     #[test]
     fn test_premium_multiplier() {
-        assert_eq!(risk_model::calculate_premium_multiplier(150), 5_000);   // 0.5x
-        assert_eq!(risk_model::calculate_premium_multiplier(500), 10_000);  // 1.0x
-        assert_eq!(risk_model::calculate_premium_multiplier(850), 25_000);  // 2.5x
+        assert_eq!(risk_model::calculate_premium_multiplier(150), 5_000); // 0.5x
+        assert_eq!(risk_model::calculate_premium_multiplier(500), 10_000); // 1.0x
+        assert_eq!(risk_model::calculate_premium_multiplier(850), 25_000); // 2.5x
     }
 
     #[test]

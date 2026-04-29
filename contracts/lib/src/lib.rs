@@ -122,7 +122,14 @@ pub mod propchain_contracts {
 
     /// Dependency type for circuit breaker
     #[derive(
-        Debug, Clone, Copy, PartialEq, Eq, scale::Encode, scale::Decode, ink::storage::traits::StorageLayout,
+        Debug,
+        Clone,
+        Copy,
+        PartialEq,
+        Eq,
+        scale::Encode,
+        scale::Decode,
+        ink::storage::traits::StorageLayout,
     )]
     #[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
     pub enum ExternalDependency {
@@ -134,7 +141,14 @@ pub mod propchain_contracts {
 
     /// Circuit breaker state for external dependencies
     #[derive(
-        Debug, Clone, PartialEq, Eq, Default, scale::Encode, scale::Decode, ink::storage::traits::StorageLayout,
+        Debug,
+        Clone,
+        PartialEq,
+        Eq,
+        Default,
+        scale::Encode,
+        scale::Decode,
+        ink::storage::traits::StorageLayout,
     )]
     #[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
     pub struct CircuitBreakerState {
@@ -146,7 +160,13 @@ pub mod propchain_contracts {
 
     /// Configuration for circuit breakers
     #[derive(
-        Debug, Clone, PartialEq, Eq, scale::Encode, scale::Decode, ink::storage::traits::StorageLayout,
+        Debug,
+        Clone,
+        PartialEq,
+        Eq,
+        scale::Encode,
+        scale::Decode,
+        ink::storage::traits::StorageLayout,
     )]
     #[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
     pub struct CircuitBreakerConfig {
@@ -1689,6 +1709,8 @@ pub mod propchain_contracts {
         #[ink(message)]
         pub fn update_valuation_from_oracle(&mut self, property_id: u64) -> Result<(), Error> {
             non_reentrant!(self, {
+                self.ensure_dependency_available(ExternalDependency::Oracle)?;
+
                 let oracle_addr = self.oracle.ok_or(Error::OracleError)?;
 
                 // Use the Oracle trait to perform the cross-contract call
@@ -1697,9 +1719,16 @@ pub mod propchain_contracts {
                     FromAccountId::from_account_id(oracle_addr);
 
                 // Fetch valuation from oracle
-                let valuation = oracle
-                    .get_valuation(property_id)
-                    .map_err(|_| Error::OracleError)?;
+                let valuation = match oracle.get_valuation(property_id) {
+                    Ok(val) => {
+                        self.record_dependency_success(ExternalDependency::Oracle);
+                        val
+                    }
+                    Err(_) => {
+                        self.record_dependency_failure(ExternalDependency::Oracle);
+                        return Err(Error::OracleError);
+                    }
+                };
 
                 // Update the property's recorded valuation in its metadata
                 if let Some(mut property) = self.properties.get(&property_id) {
@@ -3265,7 +3294,8 @@ pub mod propchain_contracts {
                 total_properties: cached.property_count,
                 total_valuation: cached.total_valuation,
                 average_valuation: if cached.property_count > 0 {
-                    cached.total_valuation
+                    cached
+                        .total_valuation
                         .checked_div(cached.property_count as u128)
                         .unwrap_or(0)
                 } else {
@@ -3273,7 +3303,10 @@ pub mod propchain_contracts {
                 },
                 total_size: cached.total_size,
                 average_size: if cached.property_count > 0 {
-                    cached.total_size.checked_div(cached.property_count).unwrap_or(0)
+                    cached
+                        .total_size
+                        .checked_div(cached.property_count)
+                        .unwrap_or(0)
                 } else {
                     0
                 },
