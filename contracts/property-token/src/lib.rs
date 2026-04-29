@@ -99,6 +99,8 @@ pub mod property_token {
         user_transfer_quotas: Mapping<(TokenId, AccountId), UserTransferQuota>,
         /// Blacklisted accounts that cannot transfer tokens
         blacklist: Mapping<AccountId, bool>,
+        /// Explicit KYC approval flag for transfer recipients
+        kyc_approved: Mapping<AccountId, bool>,
         /// Whitelisted accounts (if whitelist-only restriction is enabled)
         whitelist: Mapping<(TokenId, AccountId), bool>,
         /// Cached KYC verification levels to reduce cross-contract calls
@@ -636,6 +638,7 @@ pub mod property_token {
                 transfer_restrictions: Mapping::default(),
                 user_transfer_quotas: Mapping::default(),
                 blacklist: Mapping::default(),
+                kyc_approved: Mapping::default(),
                 whitelist: Mapping::default(),
                 kyc_verification_cache: Mapping::default(),
                 kyc_transfer_log: Mapping::default(),
@@ -716,9 +719,12 @@ pub mod property_token {
                 return Err(Error::Unauthorized);
             }
 
+            self.verify_kyc_transfer(&from, &to, token_id, 1)?;
+
             // Perform the transfer
             self.remove_token_from_owner(from, token_id)?;
             self.add_token_to_owner(to, token_id)?;
+            self.update_transfer_quota(&from, &to, token_id, 1)?;
 
             // Clear approvals
             self.token_approvals.remove(token_id);
@@ -1071,6 +1077,34 @@ pub mod property_token {
         #[ink(message)]
         pub fn is_account_blacklisted(&self, account: AccountId) -> bool {
             self.blacklist.get(account).unwrap_or(false)
+        }
+
+        /// Sets explicit KYC approval for an account.
+        #[ink(message)]
+        pub fn set_kyc_approved(
+            &mut self,
+            account: AccountId,
+            approved: bool,
+        ) -> Result<(), Error> {
+            if self.env().caller() != self.admin {
+                return Err(Error::Unauthorized);
+            }
+
+            self.kyc_approved.insert(account, &approved);
+            if approved {
+                let block = u64::from(self.env().block_number());
+                self.kyc_verification_cache
+                    .insert(account, &(KYCVerificationLevel::Standard, block));
+            } else {
+                self.kyc_verification_cache.remove(account);
+            }
+            Ok(())
+        }
+
+        /// Checks whether an account has explicit KYC approval.
+        #[ink(message)]
+        pub fn is_kyc_approved(&self, account: AccountId) -> bool {
+            self.kyc_approved.get(account).unwrap_or(false)
         }
 
         /// Adds an account to the whitelist for a specific token
@@ -1986,6 +2020,21 @@ pub mod property_token {
 
             // Get transfer restrictions for this token
             if let Some(config) = self.transfer_restrictions.get(token_id) {
+                if matches!(
+                    config.restriction_level,
+                    TransferRestrictionLevel::KYCRequired
+                        | TransferRestrictionLevel::VerificationLevelRequired
+                ) && !self.kyc_approved.get(to).unwrap_or(false)
+                {
+                    self.env().emit_event(KYCTransferRejected {
+                        from: *from,
+                        to: *to,
+                        token_id,
+                        reason: "Recipient not KYC approved".to_string(),
+                    });
+                    return Err(Error::RecipientNotVerified);
+                }
+
                 // Check whitelist if enabled
                 if config.restriction_level == TransferRestrictionLevel::WhitelistOnly {
                     if !self.whitelist.get((token_id, *from)).unwrap_or(false) {
