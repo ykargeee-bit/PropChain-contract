@@ -306,6 +306,31 @@ mod tax_compliance {
         pub status: TaxStatus,
     }
 
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, scale::Encode, scale::Decode)]
+    #[cfg_attr(
+        feature = "std",
+        derive(scale_info::TypeInfo, ink::storage::traits::StorageLayout)
+    )]
+    pub enum TaxLossHarvestingOpportunityKind {
+        Reassessment,
+        ExemptionReview,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, scale::Encode, scale::Decode)]
+    #[cfg_attr(
+        feature = "std",
+        derive(scale_info::TypeInfo, ink::storage::traits::StorageLayout)
+    )]
+    pub struct TaxLossHarvestingOpportunity {
+        pub property_id: u64,
+        pub jurisdiction_code: u32,
+        pub reporting_period: u64,
+        pub kind: TaxLossHarvestingOpportunityKind,
+        pub estimated_savings: Balance,
+        pub current_tax_due: Balance,
+        pub revised_tax_due: Balance,
+    }
+
     #[derive(Debug, PartialEq, Eq, scale::Encode, scale::Decode)]
     #[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
     pub enum Error {
@@ -1203,6 +1228,81 @@ pub struct TaxDeadlineNotification {
         }
 
         #[ink(message)]
+        pub fn get_tax_loss_harvesting_opportunities(
+            &self,
+            property_id: u64,
+            jurisdiction: Jurisdiction,
+        ) -> Result<Vec<TaxLossHarvestingOpportunity>> {
+            let now = self.env().block_timestamp();
+            let rule = self.get_active_rule(jurisdiction.code)?;
+            let assessment = self
+                .property_assessments
+                .get((property_id, jurisdiction.code))
+                .ok_or(Error::AssessmentNotFound)?;
+            let reporting_period = self
+                .latest_reporting_period
+                .get((property_id, jurisdiction.code))
+                .unwrap_or(self.reporting_period(now, rule.reporting_frequency));
+            let current_tax_due = self.estimate_tax_due(&rule, &assessment);
+            let current_taxable_value = self.taxable_value(&rule, &assessment);
+            let mut opportunities = Vec::new();
+
+            if let Some(record) = self
+                .tax_records
+                .get((property_id, jurisdiction.code, reporting_period))
+            {
+                let previous_base_due = self
+                    .base_tax_due(record.taxable_value, rule.rate_basis_points)
+                    .saturating_add(rule.fixed_charge);
+                let revised_base_due = current_tax_due;
+
+                if assessment.assessed_value < record.assessed_value
+                    || current_taxable_value < record.taxable_value
+                {
+                    let estimated_savings = previous_base_due.saturating_sub(revised_base_due);
+                    if estimated_savings > 0 {
+                        opportunities.push(TaxLossHarvestingOpportunity {
+                            property_id,
+                            jurisdiction_code: jurisdiction.code,
+                            reporting_period,
+                            kind: TaxLossHarvestingOpportunityKind::Reassessment,
+                            estimated_savings,
+                            current_tax_due: previous_base_due,
+                            revised_tax_due: revised_base_due,
+                        });
+                    }
+                }
+            }
+
+            let exemption_threshold = assessment.assessed_value / 20;
+            if assessment.exemption_override < exemption_threshold {
+                let revised_taxable_value = assessment.assessed_value.saturating_sub(
+                    rule.exemption_amount
+                        .saturating_add(exemption_threshold),
+                );
+                let revised_tax_due = self
+                    .base_tax_due(revised_taxable_value, rule.rate_basis_points)
+                    .saturating_add(rule.fixed_charge);
+                let estimated_savings = current_tax_due.saturating_sub(revised_tax_due);
+
+                if estimated_savings > 0 {
+                    opportunities.push(TaxLossHarvestingOpportunity {
+                        property_id,
+                        jurisdiction_code: jurisdiction.code,
+                        reporting_period,
+                        kind: TaxLossHarvestingOpportunityKind::ExemptionReview,
+                        estimated_savings,
+                        current_tax_due,
+                        revised_tax_due,
+                    });
+                }
+            }
+
+            opportunities.sort_by(|left, right| right.estimated_savings.cmp(&left.estimated_savings));
+            Ok(opportunities)
+        }
+
+        #[ink(message)]
         pub fn get_audit_trail(&self, property_id: u64, limit: u64) -> Vec<AuditEntry> {
             let count = self.audit_log_count.get(property_id).unwrap_or(0);
             let start = count.saturating_sub(limit);
@@ -1253,6 +1353,21 @@ pub struct TaxDeadlineNotification {
 
         fn outstanding_tax(&self, record: &TaxRecord) -> Balance {
             record.tax_due.saturating_sub(record.paid_amount)
+        }
+
+        fn taxable_value(&self, rule: &TaxRule, assessment: &PropertyAssessment) -> Balance {
+            assessment
+                .assessed_value
+                .saturating_sub(rule.exemption_amount.saturating_add(assessment.exemption_override))
+        }
+
+        fn base_tax_due(&self, taxable_value: Balance, rate_basis_points: u32) -> Balance {
+            taxable_value.saturating_mul(rate_basis_points as Balance) / BASIS_POINTS_DENOMINATOR
+        }
+
+        fn estimate_tax_due(&self, rule: &TaxRule, assessment: &PropertyAssessment) -> Balance {
+            self.base_tax_due(self.taxable_value(rule, assessment), rule.rate_basis_points)
+                .saturating_add(rule.fixed_charge)
         }
 
         fn registry_compliant(&self, owner: AccountId) -> bool {
@@ -1707,6 +1822,40 @@ pub struct TaxDeadlineNotification {
             assert_eq!(record.taxable_value, 185_000);
             assert_eq!(record.tax_due, 5_625);
             assert_eq!(record.status, TaxStatus::Assessed);
+        }
+
+        #[ink::test]
+        fn tax_loss_harvesting_recommends_reassessment_after_value_drop() {
+            let mut contract = TaxComplianceModule::new(None);
+            let owner = AccountId::from([0x07; 32]);
+
+            contract
+                .configure_tax_rule(jurisdiction(), rule())
+                .expect("rule");
+            contract
+                .set_property_assessment(11, jurisdiction(), owner, 240_000, 0)
+                .expect("assessment");
+
+            let initial_record = contract.calculate_tax(11, jurisdiction()).expect("tax");
+
+            contract
+                .set_property_assessment(11, jurisdiction(), owner, 180_000, 0)
+                .expect("updated assessment");
+
+            let opportunities = contract
+                .get_tax_loss_harvesting_opportunities(11, jurisdiction())
+                .expect("opportunities");
+
+            let reassessment = opportunities
+                .iter()
+                .find(|opportunity| {
+                    opportunity.kind == TaxLossHarvestingOpportunityKind::Reassessment
+                })
+                .expect("reassessment opportunity");
+
+            assert!(reassessment.estimated_savings > 0);
+            assert!(reassessment.current_tax_due >= reassessment.revised_tax_due);
+            assert_eq!(reassessment.reporting_period, initial_record.reporting_period);
         }
 
         #[ink::test]
