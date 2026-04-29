@@ -50,6 +50,8 @@ pub mod propchain_contracts {
         NotCompliant,
         /// Call to the compliance registry contract failed
         ComplianceCheckFailed,
+        /// An external dependency is currently unavailable due to circuit breaker state
+        ExternalDependencyUnavailable,
         /// Escrow does not exist
         EscrowNotFound,
         /// Escrow has already been released
@@ -116,6 +118,53 @@ pub mod propchain_contracts {
         fn from(_: crate::ReentrancyError) -> Self {
             Error::ReentrantCall
         }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, scale::Encode, scale::Decode)]
+    #[cfg_attr(feature = "std", derive(scale_info::TypeInfo, ink::storage::traits::StorageLayout))]
+    pub enum ExternalDependency {
+        Oracle,
+        ComplianceRegistry,
+        FeeManager,
+        IdentityRegistry,
+        PropertyManagement,
+        Bridge,
+        Insurance,
+        Governance,
+    }
+
+    #[derive(
+        Debug,
+        Clone,
+        PartialEq,
+        Eq,
+        scale::Encode,
+        scale::Decode,
+        Default,
+        ink::storage::traits::StorageLayout,
+    )]
+    #[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
+    pub struct CircuitBreakerState {
+        pub failure_count: u64,
+        pub total_failures: u64,
+        pub last_failure_at: Option<u64>,
+        pub open_until: Option<u64>,
+    }
+
+    #[derive(
+        Debug,
+        Clone,
+        PartialEq,
+        Eq,
+        scale::Encode,
+        scale::Decode,
+        Default,
+        ink::storage::traits::StorageLayout,
+    )]
+    #[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
+    pub struct CircuitBreakerConfig {
+        pub failure_threshold: u64,
+        pub cooldown_period_secs: u64,
     }
 
     /// Property Registry contract
@@ -187,6 +236,10 @@ pub mod propchain_contracts {
         /// `identity_registry` fields for new code; those fields are kept for
         /// backward-compatibility with existing callers.
         deps: ContainerConfig,
+        /// Circuit breaker configuration for external dependency calls.
+        external_call_config: CircuitBreakerConfig,
+        /// Circuit breaker state for external dependency endpoints.
+        external_call_breakers: Mapping<ExternalDependency, CircuitBreakerState>,
 
         /// Reentrancy protection guard
         reentrancy_guard: ReentrancyGuard,
@@ -1262,6 +1315,8 @@ pub mod propchain_contracts {
                     at
                 },
                 deps: ContainerConfig::new(),
+                external_call_config: CircuitBreakerConfig::default(),
+                external_call_breakers: Mapping::default(),
                 cached_analytics: CachedAnalytics::default(),
                 load_metrics: LoadMetrics::default(),
                 reentrancy_guard: ReentrancyGuard::new(),
@@ -1561,7 +1616,7 @@ pub mod propchain_contracts {
         #[ink(message)]
         pub fn configure_external_dependency_breaker(
             &mut self,
-            failure_threshold: u8,
+            failure_threshold: u64,
             cooldown_period_secs: u64,
         ) -> Result<(), Error> {
             if !self.ensure_admin_rbac() {

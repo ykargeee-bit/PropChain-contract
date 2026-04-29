@@ -278,6 +278,7 @@ pub mod property_token_codes {
     pub const HOLD_PERIOD_NOT_MET: u32 = 1032;
     pub const SENDER_RISK_LEVEL_TOO_HIGH: u32 = 1033;
     pub const RECIPIENT_RISK_LEVEL_TOO_HIGH: u32 = 1034;
+    pub const HIGH_RISK_ACCOUNT: u32 = 1035;
     pub const STAKE_NOT_FOUND: u32 = 1026;
     pub const LOCK_ACTIVE: u32 = 1027;
     pub const NO_REWARDS: u32 = 1028;
