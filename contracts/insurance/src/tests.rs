@@ -5,7 +5,8 @@ mod insurance_tests {
     use ink::env::{test, DefaultEnvironment};
 
     use crate::propchain_insurance::{
-        ClaimStatus, CoverageType, InsuranceError, PolicyStatus, PropertyInsurance,
+        ClaimStatus, CoverageType, InsuranceError, PayoutMode, PolicyStatus, PropertyInsurance,
+        TriggerComparator, TriggerMetric,
     };
 
     fn setup() -> PropertyInsurance {
