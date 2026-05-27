@@ -242,6 +242,144 @@ pub struct CrossChainTxStatus {
 }
 
 // =========================================================================
+// Emergency pause / circuit-breaker types (TASK 2)
+// =========================================================================
+
+/// Granular pause flags. Each operation class can be paused independently,
+/// or `all_operations` can be set as a master kill-switch. This lets the
+/// security team freeze e.g. only new requests while still allowing
+/// in-flight settlements to complete.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, scale::Encode, scale::Decode)]
+#[cfg_attr(
+    feature = "std",
+    derive(scale_info::TypeInfo, ink::storage::traits::StorageLayout)
+)]
+pub struct PauseFlags {
+    /// Master kill-switch — if true, every guarded operation is blocked.
+    pub all_operations: bool,
+    /// Block `initiate_bridge_multisig`.
+    pub new_requests: bool,
+    /// Block `sign_bridge_request` / signed variant.
+    pub signing: bool,
+    /// Block `execute_bridge`.
+    pub execution: bool,
+    /// Block cross-chain DEX trade registration / attachment / settlement.
+    pub cross_chain_trades: bool,
+}
+
+impl PauseFlags {
+    /// Convenience constructor: nothing paused.
+    pub fn none() -> Self {
+        Self {
+            all_operations: false,
+            new_requests: false,
+            signing: false,
+            execution: false,
+            cross_chain_trades: false,
+        }
+    }
+
+    /// Convenience constructor: master kill-switch on.
+    pub fn all() -> Self {
+        Self {
+            all_operations: true,
+            new_requests: true,
+            signing: true,
+            execution: true,
+            cross_chain_trades: true,
+        }
+    }
+}
+
+/// Logical operation classes that can be individually paused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, scale::Encode, scale::Decode)]
+#[cfg_attr(
+    feature = "std",
+    derive(scale_info::TypeInfo, ink::storage::traits::StorageLayout)
+)]
+pub enum BridgeOperation {
+    NewRequest,
+    Signing,
+    Execution,
+    CrossChainTrade,
+}
+
+/// Why an emergency pause / unpause was triggered. Used both for the
+/// audit log and for the on-chain event so dashboards can categorize
+/// incidents.
+#[derive(Debug, Clone, PartialEq, Eq, scale::Encode, scale::Decode)]
+#[cfg_attr(
+    feature = "std",
+    derive(scale_info::TypeInfo, ink::storage::traits::StorageLayout)
+)]
+pub enum PauseReason {
+    /// Manual action by the bridge admin.
+    ManualAdmin,
+    /// Manual action by a registered guardian.
+    GuardianTrigger,
+    /// Auto-pause: per-account request burst exceeded the threshold.
+    SuspiciousFrequency,
+    /// Auto-pause: chain volume in the rolling window exceeded the threshold.
+    SuspiciousVolume,
+    /// Auto-pause: too many failed/rejected signatures in the rolling window.
+    FailedSignatureSurge,
+    /// Free-form reason (carried in the audit `detail` field).
+    Custom,
+}
+
+/// Single audit entry recording a pause or unpause action.
+#[derive(Debug, Clone, PartialEq, scale::Encode, scale::Decode)]
+#[cfg_attr(
+    feature = "std",
+    derive(scale_info::TypeInfo, ink::storage::traits::StorageLayout)
+)]
+pub struct PauseAuditEntry {
+    pub triggered_by: AccountId,
+    /// `true` if this entry is a pause, `false` if it is an unpause.
+    pub paused: bool,
+    /// Snapshot of the resulting flag state right after this action.
+    pub flags_after: PauseFlags,
+    pub reason: PauseReason,
+    /// Optional human-readable detail (incident reference, ticket, etc.).
+    pub detail: Option<String>,
+    pub block_number: u64,
+    pub timestamp: u64,
+}
+
+/// Tunable thresholds that drive automatic pausing on suspicious activity.
+/// All bounds are inclusive — hitting `>=` the configured value triggers.
+#[derive(Debug, Clone, PartialEq, Eq, scale::Encode, scale::Decode)]
+#[cfg_attr(
+    feature = "std",
+    derive(scale_info::TypeInfo, ink::storage::traits::StorageLayout)
+)]
+pub struct SuspiciousActivityConfig {
+    /// Master switch for the auto-pause feature.
+    pub auto_pause_enabled: bool,
+    /// Maximum bridge requests an account may submit in a single block
+    /// before its activity is treated as a burst attack.
+    pub max_requests_per_block_per_account: u32,
+    /// Maximum aggregate cross-chain volume routed to one chain in a
+    /// 1-hour rolling window before auto-pause.
+    pub max_volume_per_hour_per_chain: u128,
+    /// Maximum number of `approve = false` (rejection) signatures observed
+    /// in a 1-hour rolling window before auto-pause.
+    pub max_failed_signatures_per_hour: u32,
+}
+
+impl SuspiciousActivityConfig {
+    /// Sensible defaults; admins should tune to their deployment profile.
+    pub fn default_config() -> Self {
+        Self {
+            auto_pause_enabled: true,
+            max_requests_per_block_per_account: 5,
+            max_volume_per_hour_per_chain: 10_000_000_000_000_000_000,
+            max_failed_signatures_per_hour: 10,
+        }
+    }
+}
+
+// =========================================================================
 // Trait Definitions
 // =========================================================================
 

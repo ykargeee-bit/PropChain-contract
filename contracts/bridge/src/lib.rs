@@ -14,6 +14,10 @@ mod bridge {
 
     include!("errors.rs");
 
+    /// Maximum number of entries kept in [`PropertyBridge::pause_audit_log`].
+    /// When the log reaches this size, the oldest entry is dropped on insert.
+    const PAUSE_AUDIT_LOG_LIMIT: usize = 256;
+
     impl From<ReentrancyError> for Error {
         fn from(_: ReentrancyError) -> Self {
             Error::ReentrantCall
@@ -89,6 +93,42 @@ mod bridge {
 
         /// Reentrancy protection
         reentrancy_guard: ReentrancyGuard,
+
+        // ── Emergency pause / circuit-breaker (TASK 2) ──────────────────────────
+        /// Granular pause flags. Per-operation kill-switches plus a master
+        /// `all_operations` flag so individual flows can be frozen without a
+        /// full bridge halt.
+        pause_flags: PauseFlags,
+
+        /// Registered guardians (security incident-responders). Guardians
+        /// can trigger an emergency pause but only the admin may unpause.
+        guardians: Vec<AccountId>,
+
+        /// Bounded chronological audit log of every pause / unpause event.
+        /// Capped to `PAUSE_AUDIT_LOG_LIMIT` entries; oldest dropped on
+        /// overflow to keep storage usage predictable.
+        pause_audit_log: Vec<PauseAuditEntry>,
+
+        /// Tunable thresholds that drive automatic pausing.
+        suspicious_config: SuspiciousActivityConfig,
+
+        /// Per-account counters: number of bridge requests submitted in the
+        /// most recent observed block. Reset when a new block is observed.
+        account_block_request_count: Mapping<AccountId, u32>,
+        /// Per-account: the block number `account_block_request_count`
+        /// applies to.
+        account_block_request_block: Mapping<AccountId, u64>,
+
+        /// Per-chain rolling 1-hour volume counter (sum of `amount_in` from
+        /// `register_cross_chain_trade`).
+        chain_hourly_volume: Mapping<ChainId, u128>,
+        /// Per-chain: the start-of-hour block timestamp the counter applies to.
+        chain_hourly_window_start: Mapping<ChainId, u64>,
+
+        /// Rolling 1-hour count of `approve = false` signatures.
+        failed_signatures_window_count: u32,
+        /// Start-of-hour timestamp the failed-signature counter applies to.
+        failed_signatures_window_start: u64,
     }
 
     /// Events for bridge operations
@@ -174,6 +214,55 @@ mod bridge {
         pub timestamp: u64,
     }
 
+    // ── Emergency pause events (TASK 2) ───────────────────────────────────
+
+    /// Emitted when the bridge enters (or extends) an emergency-paused state.
+    #[ink(event)]
+    pub struct EmergencyPauseTriggered {
+        #[ink(topic)]
+        pub triggered_by: AccountId,
+        pub reason: PauseReason,
+        pub flags: PauseFlags,
+        pub detail: Option<String>,
+        pub block_number: u32,
+        pub timestamp: u64,
+    }
+
+    /// Emitted when the bridge exits (fully or partially) an emergency-paused state.
+    #[ink(event)]
+    pub struct EmergencyUnpaused {
+        #[ink(topic)]
+        pub triggered_by: AccountId,
+        pub flags: PauseFlags,
+        pub block_number: u32,
+        pub timestamp: u64,
+    }
+
+    /// Emitted when a guardian is added or removed.
+    #[ink(event)]
+    pub struct GuardianSetUpdated {
+        #[ink(topic)]
+        pub guardian: AccountId,
+        /// `true` when added, `false` when removed.
+        pub added: bool,
+    }
+
+    /// Emitted when the auto-pause subsystem flags suspicious activity
+    /// (whether or not the threshold is exceeded). Useful for early
+    /// dashboards / alerting.
+    #[ink(event)]
+    pub struct SuspiciousActivityDetected {
+        #[ink(topic)]
+        pub reason: PauseReason,
+        #[ink(topic)]
+        pub subject: AccountId,
+        pub chain_id: Option<ChainId>,
+        pub measured: u128,
+        pub threshold: u128,
+        pub triggered_pause: bool,
+        pub timestamp: u64,
+    }
+
     impl PropertyBridge {
         /// Creates a new PropertyBridge contract
         #[ink(constructor)]
@@ -221,6 +310,16 @@ mod bridge {
                 chain_daily_volume: Mapping::default(),
                 chain_last_reset_day: Mapping::default(),
                 reentrancy_guard: ReentrancyGuard::new(),
+                pause_flags: PauseFlags::none(),
+                guardians: Vec::new(),
+                pause_audit_log: Vec::new(),
+                suspicious_config: SuspiciousActivityConfig::default_config(),
+                account_block_request_count: Mapping::default(),
+                account_block_request_block: Mapping::default(),
+                chain_hourly_volume: Mapping::default(),
+                chain_hourly_window_start: Mapping::default(),
+                failed_signatures_window_count: 0,
+                failed_signatures_window_start: 0,
             };
 
             // Set up default chain information
@@ -254,10 +353,14 @@ mod bridge {
         ) -> Result<u64, Error> {
             let caller = self.env().caller();
 
-            // Check if bridge is paused
-            if self.config.emergency_pause {
-                return Err(Error::BridgePaused);
-            }
+            // Granular pause check: blocks if `new_requests`, `all_operations`,
+            // or the legacy `BridgeConfig::emergency_pause` is set.
+            self.ensure_not_paused(BridgeOperation::NewRequest)?;
+
+            // Suspicious-activity heuristic: per-block request burst.
+            // If the burst threshold is hit on this very call, the auto-pause
+            // kicks in and the offending request is also rejected.
+            self.track_request_burst(caller)?;
 
             // Validate destination chain
             if !self.config.supported_chains.contains(&destination_chain) {
@@ -329,6 +432,10 @@ mod bridge {
         pub fn sign_bridge_request(&mut self, request_id: u64, approve: bool) -> Result<(), Error> {
             let caller = self.env().caller();
 
+            // Granular pause check: blocks if `signing` or `all_operations`
+            // is set (or the legacy emergency-pause boolean).
+            self.ensure_not_paused(BridgeOperation::Signing)?;
+
             // Check if caller is a registered validator (issue #203: only validators may sign)
             if !self.validators.contains(&caller) {
                 return Err(Error::Unauthorized);
@@ -362,6 +469,12 @@ mod bridge {
             }
 
             self.bridge_requests.insert(request_id, &request);
+
+            // Suspicious-activity heuristic: surge of failed-signature votes
+            // may indicate validator compromise or coordinated attack.
+            if !approve {
+                self.track_failed_signature(caller);
+            }
 
             self.env().emit_event(BridgeRequestSigned {
                 request_id,
@@ -421,6 +534,10 @@ mod bridge {
         pub fn execute_bridge(&mut self, request_id: u64) -> Result<(), Error> {
             non_reentrant!(self, {
                 let caller = self.env().caller();
+
+                // Granular pause check: blocks if `execution` or
+                // `all_operations` is set (or the legacy emergency-pause).
+                self.ensure_not_paused(BridgeOperation::Execution)?;
 
                 // Check if caller is a bridge operator
                 if !self.bridge_operators.contains(&caller) {
@@ -734,17 +851,23 @@ mod bridge {
             amount_in: u128,
             min_amount_out: u128,
         ) -> Result<u64, Error> {
-            if self.config.emergency_pause {
-                return Err(Error::BridgePaused);
-            }
+            let caller = self.env().caller();
+
+            // Granular pause check: blocks if `cross_chain_trades` or
+            // `all_operations` is set (or the legacy emergency-pause).
+            self.ensure_not_paused(BridgeOperation::CrossChainTrade)?;
+
             if !self.config.supported_chains.contains(&destination_chain) {
                 return Err(Error::InvalidChain);
             }
 
+            // Suspicious-activity heuristic: rolling 1-hour per-chain volume.
+            self.track_chain_volume(caller, destination_chain, amount_in)?;
+
             // Enforce rate limiting
             // For cross-chain trades, we track the volume (amount_in) but don't count it as an NFT request.
             self.check_and_update_rate_limits(
-                self.env().caller(),
+                caller,
                 destination_chain,
                 amount_in,
                 false,
@@ -780,6 +903,13 @@ mod bridge {
             bridge_request_id: u64,
         ) -> Result<(), Error> {
             let caller = self.env().caller();
+
+            // Pause-aware: still allow admin recovery actions even when
+            // cross-chain trades are paused.
+            if caller != self.admin {
+                self.ensure_not_paused(BridgeOperation::CrossChainTrade)?;
+            }
+
             let mut trade = self
                 .cross_chain_trades
                 .get(trade_id)
@@ -800,6 +930,13 @@ mod bridge {
             if caller != self.admin && !self.bridge_operators.contains(&caller) {
                 return Err(Error::Unauthorized);
             }
+
+            // Pause-aware: admin can always finalize trades for recovery,
+            // operators are blocked while cross-chain trades are paused.
+            if caller != self.admin {
+                self.ensure_not_paused(BridgeOperation::CrossChainTrade)?;
+            }
+
             let mut trade = self
                 .cross_chain_trades
                 .get(trade_id)
@@ -905,7 +1042,11 @@ mod bridge {
             self.config.clone()
         }
 
-        /// Pauses or unpauses the bridge (admin only)
+        /// Pauses or unpauses the bridge (admin only).
+        ///
+        /// Backwards-compatible entry point: `paused = true` sets the master
+        /// kill-switch via [`apply_pause`] (full audit + event), and
+        /// `paused = false` clears every pause flag via [`apply_unpause`].
         #[ink(message)]
         pub fn set_emergency_pause(&mut self, paused: bool) -> Result<(), Error> {
             let caller = self.env().caller();
@@ -913,7 +1054,16 @@ mod bridge {
                 return Err(Error::Unauthorized);
             }
 
-            self.config.emergency_pause = paused;
+            if paused {
+                self.apply_pause(
+                    caller,
+                    PauseFlags::all(),
+                    PauseReason::ManualAdmin,
+                    Some(String::from("Legacy set_emergency_pause(true)")),
+                );
+            } else {
+                self.apply_unpause(caller, PauseFlags::all());
+            }
             Ok(())
         }
 
@@ -1006,6 +1156,180 @@ mod bridge {
             }
 
             self.pending_admin_rotation = None;
+            Ok(())
+        }
+
+        // ── Emergency pause / circuit-breaker (TASK 2) ─────────────────────
+
+        /// Register a guardian. Guardians can trigger an emergency pause but
+        /// cannot unpause; only the admin may lift a pause. Admin only.
+        #[ink(message)]
+        pub fn add_guardian(&mut self, guardian: AccountId) -> Result<(), Error> {
+            if self.env().caller() != self.admin {
+                return Err(Error::Unauthorized);
+            }
+            if !self.guardians.contains(&guardian) {
+                self.guardians.push(guardian);
+                self.env().emit_event(GuardianSetUpdated {
+                    guardian,
+                    added: true,
+                });
+            }
+            Ok(())
+        }
+
+        /// Remove a guardian. Admin only.
+        #[ink(message)]
+        pub fn remove_guardian(&mut self, guardian: AccountId) -> Result<(), Error> {
+            if self.env().caller() != self.admin {
+                return Err(Error::Unauthorized);
+            }
+            let before = self.guardians.len();
+            self.guardians.retain(|g| g != &guardian);
+            if self.guardians.len() != before {
+                self.env().emit_event(GuardianSetUpdated {
+                    guardian,
+                    added: false,
+                });
+            }
+            Ok(())
+        }
+
+        /// Returns whether `account` is a registered guardian.
+        #[ink(message)]
+        pub fn is_guardian(&self, account: AccountId) -> bool {
+            self.guardians.contains(&account)
+        }
+
+        /// Returns the full guardian set.
+        #[ink(message)]
+        pub fn get_guardians(&self) -> Vec<AccountId> {
+            self.guardians.clone()
+        }
+
+        /// Trigger an emergency pause. The `flags` argument is OR-merged
+        /// onto the existing flags so partial pauses can be escalated
+        /// (e.g. "new requests" -> "new requests + signing") without
+        /// clobbering already-set bits. Both admin and guardians may call.
+        ///
+        /// `reason` categorizes the incident for dashboards; `detail` is an
+        /// optional free-form string (incident ticket / IoC / etc.).
+        #[ink(message)]
+        pub fn emergency_pause(
+            &mut self,
+            flags: PauseFlags,
+            reason: PauseReason,
+            detail: Option<String>,
+        ) -> Result<(), Error> {
+            let caller = self.env().caller();
+            let is_admin = caller == self.admin;
+            let is_guardian = self.guardians.contains(&caller);
+            if !is_admin && !is_guardian {
+                return Err(Error::NotGuardian);
+            }
+            // Reject "empty pause" calls so we don't pollute the audit log.
+            if !(flags.all_operations
+                || flags.new_requests
+                || flags.signing
+                || flags.execution
+                || flags.cross_chain_trades)
+            {
+                return Err(Error::InvalidRequest);
+            }
+            self.apply_pause(caller, flags, reason, detail);
+            Ok(())
+        }
+
+        /// Lift an emergency pause. The `flags` argument tells *which* bits
+        /// to clear (the rest stay paused). Pass [`PauseFlags::all()`] for a
+        /// full unpause. Admin only — guardians may pause but not unpause.
+        #[ink(message)]
+        pub fn emergency_unpause(&mut self, flags: PauseFlags) -> Result<(), Error> {
+            let caller = self.env().caller();
+            if caller != self.admin {
+                return Err(Error::Unauthorized);
+            }
+            self.apply_unpause(caller, flags);
+            Ok(())
+        }
+
+        /// Returns whether `op` is currently paused (either via its own
+        /// flag or via the master `all_operations` flag).
+        #[ink(message)]
+        pub fn is_operation_paused(&self, op: BridgeOperation) -> bool {
+            self.is_op_paused(op)
+        }
+
+        /// Returns the full pause-flag snapshot.
+        #[ink(message)]
+        pub fn get_pause_flags(&self) -> PauseFlags {
+            self.pause_flags
+        }
+
+        /// Returns the chronological pause/unpause audit log.
+        #[ink(message)]
+        pub fn get_pause_audit_log(&self) -> Vec<PauseAuditEntry> {
+            self.pause_audit_log.clone()
+        }
+
+        /// Returns the current suspicious-activity thresholds.
+        #[ink(message)]
+        pub fn get_suspicious_config(&self) -> SuspiciousActivityConfig {
+            self.suspicious_config.clone()
+        }
+
+        /// Update the suspicious-activity thresholds. Admin only.
+        #[ink(message)]
+        pub fn update_suspicious_config(
+            &mut self,
+            config: SuspiciousActivityConfig,
+        ) -> Result<(), Error> {
+            if self.env().caller() != self.admin {
+                return Err(Error::Unauthorized);
+            }
+            self.suspicious_config = config;
+            Ok(())
+        }
+
+        /// Manually report a suspicious activity event from off-chain
+        /// monitoring. Admin or guardians may call. The contract emits a
+        /// [`SuspiciousActivityDetected`] event and, when
+        /// `auto_pause_enabled` is on, immediately triggers an emergency
+        /// pause for the relevant operation class.
+        #[ink(message)]
+        pub fn report_suspicious_activity(
+            &mut self,
+            reason: PauseReason,
+            subject: AccountId,
+            chain_id: Option<ChainId>,
+            measured: u128,
+            threshold: u128,
+            detail: Option<String>,
+        ) -> Result<(), Error> {
+            let caller = self.env().caller();
+            let is_admin = caller == self.admin;
+            let is_guardian = self.guardians.contains(&caller);
+            if !is_admin && !is_guardian {
+                return Err(Error::NotGuardian);
+            }
+            let auto_pause = self.suspicious_config.auto_pause_enabled
+                && measured >= threshold
+                && threshold > 0;
+
+            self.env().emit_event(SuspiciousActivityDetected {
+                reason: reason.clone(),
+                subject,
+                chain_id,
+                measured,
+                threshold,
+                triggered_pause: auto_pause,
+                timestamp: self.env().block_timestamp(),
+            });
+
+            if auto_pause {
+                let flags = pause_flags_for_reason(&reason);
+                self.apply_pause(caller, flags, reason, detail);
+            }
             Ok(())
         }
 
@@ -1451,6 +1775,267 @@ mod bridge {
                 timestamp,
             });
         }
+
+        // ── Emergency pause helper methods (TASK 2) ──────────────────────
+
+        /// Returns whether a given operation class is currently blocked
+        /// (either by its own flag, the master flag, or the legacy
+        /// `BridgeConfig::emergency_pause` boolean kept for back-compat).
+        fn is_op_paused(&self, op: BridgeOperation) -> bool {
+            if self.config.emergency_pause || self.pause_flags.all_operations {
+                return true;
+            }
+            match op {
+                BridgeOperation::NewRequest => self.pause_flags.new_requests,
+                BridgeOperation::Signing => self.pause_flags.signing,
+                BridgeOperation::Execution => self.pause_flags.execution,
+                BridgeOperation::CrossChainTrade => self.pause_flags.cross_chain_trades,
+            }
+        }
+
+        /// Returns `Err(OperationPaused)` if the given op is currently paused.
+        fn ensure_not_paused(&self, op: BridgeOperation) -> Result<(), Error> {
+            if self.is_op_paused(op) {
+                Err(Error::OperationPaused)
+            } else {
+                Ok(())
+            }
+        }
+
+        /// Apply a pause: OR-merge `flags` onto current state, mirror to the
+        /// legacy `config.emergency_pause` master switch, append a bounded
+        /// audit entry, and emit [`EmergencyPauseTriggered`].
+        fn apply_pause(
+            &mut self,
+            triggered_by: AccountId,
+            flags: PauseFlags,
+            reason: PauseReason,
+            detail: Option<String>,
+        ) {
+            self.pause_flags.all_operations |= flags.all_operations;
+            self.pause_flags.new_requests |= flags.new_requests;
+            self.pause_flags.signing |= flags.signing;
+            self.pause_flags.execution |= flags.execution;
+            self.pause_flags.cross_chain_trades |= flags.cross_chain_trades;
+
+            // Mirror master flag onto the legacy boolean so existing callers
+            // (and existing checks elsewhere in the contract) see the pause.
+            if self.pause_flags.all_operations {
+                self.config.emergency_pause = true;
+            }
+
+            let block_number = u64::from(self.env().block_number());
+            let timestamp = self.env().block_timestamp();
+            let entry = PauseAuditEntry {
+                triggered_by,
+                paused: true,
+                flags_after: self.pause_flags,
+                reason: reason.clone(),
+                detail: detail.clone(),
+                block_number,
+                timestamp,
+            };
+            self.push_audit_entry(entry);
+
+            self.env().emit_event(EmergencyPauseTriggered {
+                triggered_by,
+                reason,
+                flags: self.pause_flags,
+                detail,
+                block_number: self.env().block_number(),
+                timestamp,
+            });
+        }
+
+        /// Apply an unpause: clear the bits set in `flags` from current
+        /// state, sync the legacy master boolean, audit and emit.
+        fn apply_unpause(&mut self, triggered_by: AccountId, flags: PauseFlags) {
+            if flags.all_operations {
+                self.pause_flags.all_operations = false;
+            }
+            if flags.new_requests {
+                self.pause_flags.new_requests = false;
+            }
+            if flags.signing {
+                self.pause_flags.signing = false;
+            }
+            if flags.execution {
+                self.pause_flags.execution = false;
+            }
+            if flags.cross_chain_trades {
+                self.pause_flags.cross_chain_trades = false;
+            }
+            // Sync legacy master boolean.
+            self.config.emergency_pause = self.pause_flags.all_operations;
+
+            let block_number = u64::from(self.env().block_number());
+            let timestamp = self.env().block_timestamp();
+            let entry = PauseAuditEntry {
+                triggered_by,
+                paused: false,
+                flags_after: self.pause_flags,
+                reason: PauseReason::ManualAdmin,
+                detail: None,
+                block_number,
+                timestamp,
+            };
+            self.push_audit_entry(entry);
+
+            self.env().emit_event(EmergencyUnpaused {
+                triggered_by,
+                flags: self.pause_flags,
+                block_number: self.env().block_number(),
+                timestamp,
+            });
+        }
+
+        /// Append `entry` to the bounded audit log, dropping the oldest
+        /// entry if [`PAUSE_AUDIT_LOG_LIMIT`] would be exceeded.
+        fn push_audit_entry(&mut self, entry: PauseAuditEntry) {
+            if self.pause_audit_log.len() >= PAUSE_AUDIT_LOG_LIMIT {
+                // Drop oldest. Vec::remove(0) is O(n) but the cap is small.
+                self.pause_audit_log.remove(0);
+            }
+            self.pause_audit_log.push(entry);
+        }
+
+        // ── Suspicious activity detection (TASK 2) ───────────────────────
+
+        /// Track that `account` just submitted a new bridge request and
+        /// auto-pause new-requests if the per-block burst threshold is hit.
+        ///
+        /// Returns `Err(OperationPaused)` only if the auto-pause kicked in
+        /// during this very call, so the offending request itself is also
+        /// rejected (defense-in-depth).
+        fn track_request_burst(&mut self, account: AccountId) -> Result<(), Error> {
+            if !self.suspicious_config.auto_pause_enabled {
+                return Ok(());
+            }
+            let current_block = u64::from(self.env().block_number());
+            let last_block = self
+                .account_block_request_block
+                .get(account)
+                .unwrap_or(0);
+            let mut count = if last_block == current_block {
+                self.account_block_request_count.get(account).unwrap_or(0)
+            } else {
+                0
+            };
+            count = count.saturating_add(1);
+            self.account_block_request_block
+                .insert(account, &current_block);
+            self.account_block_request_count
+                .insert(account, &count);
+
+            let threshold = self.suspicious_config.max_requests_per_block_per_account;
+            if threshold > 0 && count >= threshold {
+                let flags = pause_flags_for_reason(&PauseReason::SuspiciousFrequency);
+                self.env().emit_event(SuspiciousActivityDetected {
+                    reason: PauseReason::SuspiciousFrequency,
+                    subject: account,
+                    chain_id: None,
+                    measured: u128::from(count),
+                    threshold: u128::from(threshold),
+                    triggered_pause: true,
+                    timestamp: self.env().block_timestamp(),
+                });
+                self.apply_pause(
+                    account,
+                    flags,
+                    PauseReason::SuspiciousFrequency,
+                    Some(String::from("Auto: per-block request burst")),
+                );
+                return Err(Error::OperationPaused);
+            }
+            Ok(())
+        }
+
+        /// Track per-chain rolling 1-hour volume and auto-pause cross-chain
+        /// trades if the configured threshold is exceeded.
+        fn track_chain_volume(
+            &mut self,
+            account: AccountId,
+            chain_id: ChainId,
+            amount: u128,
+        ) -> Result<(), Error> {
+            if !self.suspicious_config.auto_pause_enabled || amount == 0 {
+                return Ok(());
+            }
+            let now = self.env().block_timestamp();
+            // 1-hour window in milliseconds (block_timestamp is ms in ink!).
+            const HOUR_MS: u64 = 3_600_000;
+            let window_start = self
+                .chain_hourly_window_start
+                .get(chain_id)
+                .unwrap_or(0);
+            let mut volume = if now.saturating_sub(window_start) < HOUR_MS {
+                self.chain_hourly_volume.get(chain_id).unwrap_or(0)
+            } else {
+                self.chain_hourly_window_start.insert(chain_id, &now);
+                0
+            };
+            volume = volume.saturating_add(amount);
+            self.chain_hourly_volume.insert(chain_id, &volume);
+
+            let threshold = self.suspicious_config.max_volume_per_hour_per_chain;
+            if threshold > 0 && volume >= threshold {
+                let flags = pause_flags_for_reason(&PauseReason::SuspiciousVolume);
+                self.env().emit_event(SuspiciousActivityDetected {
+                    reason: PauseReason::SuspiciousVolume,
+                    subject: account,
+                    chain_id: Some(chain_id),
+                    measured: volume,
+                    threshold,
+                    triggered_pause: true,
+                    timestamp: now,
+                });
+                self.apply_pause(
+                    account,
+                    flags,
+                    PauseReason::SuspiciousVolume,
+                    Some(String::from("Auto: chain hourly volume")),
+                );
+                return Err(Error::OperationPaused);
+            }
+            Ok(())
+        }
+
+        /// Track failed-signature surge and auto-pause signing if the
+        /// configured 1-hour threshold is exceeded. Called from
+        /// [`sign_bridge_request`] when `approve == false`.
+        fn track_failed_signature(&mut self, signer: AccountId) {
+            if !self.suspicious_config.auto_pause_enabled {
+                return;
+            }
+            let now = self.env().block_timestamp();
+            const HOUR_MS: u64 = 3_600_000;
+            if now.saturating_sub(self.failed_signatures_window_start) >= HOUR_MS {
+                self.failed_signatures_window_start = now;
+                self.failed_signatures_window_count = 0;
+            }
+            self.failed_signatures_window_count =
+                self.failed_signatures_window_count.saturating_add(1);
+
+            let threshold = self.suspicious_config.max_failed_signatures_per_hour;
+            if threshold > 0 && self.failed_signatures_window_count >= threshold {
+                let flags = pause_flags_for_reason(&PauseReason::FailedSignatureSurge);
+                self.env().emit_event(SuspiciousActivityDetected {
+                    reason: PauseReason::FailedSignatureSurge,
+                    subject: signer,
+                    chain_id: None,
+                    measured: u128::from(self.failed_signatures_window_count),
+                    threshold: u128::from(threshold),
+                    triggered_pause: true,
+                    timestamp: now,
+                });
+                self.apply_pause(
+                    signer,
+                    flags,
+                    PauseReason::FailedSignatureSurge,
+                    Some(String::from("Auto: failed-signature surge")),
+                );
+            }
+        }
     }
 
     /// Free helper: validate per-chain status transitions.
@@ -1493,5 +2078,21 @@ mod bridge {
             (Submitted, NotStarted) | (Confirming, NotStarted) => BridgeOperationStatus::Pending,
             _ => BridgeOperationStatus::InTransit,
         }
+    }
+
+    /// Map a [`PauseReason`] to the minimal set of pause flags that should
+    /// be activated when that reason fires (e.g. a request-burst triggers
+    /// `new_requests`, a failed-signature surge triggers `signing`).
+    fn pause_flags_for_reason(reason: &PauseReason) -> PauseFlags {
+        let mut flags = PauseFlags::none();
+        match reason {
+            PauseReason::SuspiciousFrequency => flags.new_requests = true,
+            PauseReason::SuspiciousVolume => flags.cross_chain_trades = true,
+            PauseReason::FailedSignatureSurge => flags.signing = true,
+            PauseReason::ManualAdmin
+            | PauseReason::GuardianTrigger
+            | PauseReason::Custom => flags.all_operations = true,
+        }
+        flags
     }
 }
