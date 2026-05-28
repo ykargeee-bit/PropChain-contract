@@ -327,6 +327,10 @@ pub mod bridge_codes {
     pub const BRIDGE_GAS_LIMIT_EXCEEDED: u32 = 3012;
     pub const BRIDGE_RATE_LIMIT_EXCEEDED: u32 = 3013;
     pub const REENTRANT_CALL: u32 = 3014;
+    pub const BRIDGE_TRANSACTION_NOT_FOUND: u32 = 3015;
+    pub const BRIDGE_INVALID_STATUS_TRANSITION: u32 = 3016;
+    pub const BRIDGE_OPERATION_PAUSED: u32 = 3017;
+    pub const BRIDGE_NOT_GUARDIAN: u32 = 3018;
 }
 
 /// Oracle error codes (4000-4999)

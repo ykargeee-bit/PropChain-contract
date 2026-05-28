@@ -17,6 +17,14 @@ pub enum Error {
     GasLimitExceeded,
     RateLimitExceeded,
     ReentrantCall,
+    /// No cross-chain transaction status record exists for the given identifier.
+    TransactionNotFound,
+    /// The requested status transition is not valid for the current status.
+    InvalidStatusTransition,
+    /// The targeted operation class is currently paused (emergency stop).
+    OperationPaused,
+    /// Caller is not a registered guardian (and not the admin).
+    NotGuardian,
 }
 
 impl core::fmt::Display for Error {
@@ -36,6 +44,10 @@ impl core::fmt::Display for Error {
             Error::GasLimitExceeded => write!(f, "Gas limit exceeded"),
             Error::RateLimitExceeded => write!(f, "Rate limit exceeded"),
             Error::ReentrantCall => write!(f, "Reentrant call"),
+            Error::TransactionNotFound => write!(f, "Cross-chain transaction not found"),
+            Error::InvalidStatusTransition => write!(f, "Invalid cross-chain status transition"),
+            Error::OperationPaused => write!(f, "Operation is currently paused"),
+            Error::NotGuardian => write!(f, "Caller is not a guardian"),
         }
     }
 }
@@ -57,6 +69,10 @@ impl ContractError for Error {
             Error::GasLimitExceeded => bridge_codes::BRIDGE_GAS_LIMIT_EXCEEDED,
             Error::RateLimitExceeded => bridge_codes::BRIDGE_RATE_LIMIT_EXCEEDED,
             Error::ReentrantCall => bridge_codes::REENTRANT_CALL,
+            Error::TransactionNotFound => bridge_codes::BRIDGE_TRANSACTION_NOT_FOUND,
+            Error::InvalidStatusTransition => bridge_codes::BRIDGE_INVALID_STATUS_TRANSITION,
+            Error::OperationPaused => bridge_codes::BRIDGE_OPERATION_PAUSED,
+            Error::NotGuardian => bridge_codes::BRIDGE_NOT_GUARDIAN,
         }
     }
 
@@ -80,6 +96,18 @@ impl ContractError for Error {
             Error::GasLimitExceeded => "The operation exceeded the gas limit",
             Error::RateLimitExceeded => "The operation exceeded the daily rate limit",
             Error::ReentrantCall => "Reentrancy guard detected a reentrant call",
+            Error::TransactionNotFound => {
+                "No cross-chain transaction status record exists for the given identifier"
+            }
+            Error::InvalidStatusTransition => {
+                "The requested per-chain status transition is not allowed from the current status"
+            }
+            Error::OperationPaused => {
+                "The targeted bridge operation class has been emergency-paused"
+            }
+            Error::NotGuardian => {
+                "The caller is not registered as a guardian and is not the admin"
+            }
         }
     }
 
