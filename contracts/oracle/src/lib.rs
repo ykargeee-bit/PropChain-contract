@@ -77,6 +77,12 @@ mod propchain_oracle {
         /// Maximum batch size for batch operations
         max_batch_size: u32,
 
+        // ── Update Frequency Control (Issue #225) ────────────────────────────
+        /// Minimum interval (in blocks) between two updates for the same source
+        min_update_interval_blocks: u64,
+        /// Last update time per source: source_id -> block_number
+        last_source_update: Mapping<String, u64>,
+
         // ── Circuit Breaker (Issue #316) ──────────────────────────────────────
         /// When true, valuation updates that exceed `volatility_threshold` are
         /// automatically blocked until an admin resets the breaker.
@@ -269,6 +275,8 @@ mod propchain_oracle {
                 request_id_counter: 0,
                 ai_valuation_contract: None,
                 max_batch_size: 50,
+                min_update_interval_blocks: 6, // ~36 seconds at 6s blocks
+                last_source_update: Mapping::default(),
                 // Circuit breaker defaults (Issue #316)
                 circuit_breaker_active: false,
                 volatility_threshold: 20, // 20% default threshold
@@ -1439,20 +1447,45 @@ mod propchain_oracle {
             Ok(())
         }
 
+        fn enforce_frequency_check(&self, source_id: &str) -> Result<(), OracleError> {
+            if self.min_update_interval_blocks == 0 {
+                return Ok(()); // No frequency limit
+            }
+            let last = self.last_source_update.get(&source_id.to_string()).unwrap_or(0);
+            let current = self.env().block_number() as u64;
+            if last > 0 && current.saturating_sub(last) < self.min_update_interval_blocks {
+                return Err(OracleError::RequestPending);
+            }
+            Ok(())
+        }
+
         fn collect_prices_from_sources(
-            &self,
+            &mut self,
             property_id: u64,
         ) -> Result<Vec<PriceData>, OracleError> {
             let mut prices = Vec::new();
+            let current_block = self.env().block_number() as u64;
 
             for source_id in &self.active_sources {
                 if let Some(source) = self.oracle_sources.get(source_id) {
+                    // Frequency control check
+                    if let Err(e) = self.enforce_frequency_check(source_id) {
+                        self.env().emit_event(UpdateThrottled {
+                            source_id: source_id.clone(),
+                            last_update: self.last_source_update.get(source_id).unwrap_or(0),
+                            current_block,
+                            min_interval: self.min_update_interval_blocks,
+                        });
+                        continue;
+                    }
+
                     // In a real implementation, this would call external price feeds
-                    // For now, we'll simulate price collection
                     match self.get_price_from_source(&source, property_id) {
                         Ok(price_data) => {
                             if self.is_price_fresh(&price_data) {
                                 prices.push(price_data);
+                                // Update last-update timestamp
+                                self.last_source_update.insert(source_id, &current_block);
                             }
                         }
                         Err(_) => continue, // Skip failed sources
@@ -1573,27 +1606,48 @@ mod propchain_oracle {
             }
 
             // Remove outliers
-            let filtered_prices = self.filter_outliers(prices);
+            let filtered = self.filter_outliers(prices);
 
-            if filtered_prices.is_empty() {
+            if filtered.is_empty() {
                 return Err(OracleError::InsufficientSources);
             }
 
-            // Weighted average based on source weights
-            let mut total_weighted_price = 0u128;
-            let mut total_weight = 0u32;
-
-            for price_data in &filtered_prices {
-                let weight = self.get_source_weight(&price_data.source)?;
-                total_weighted_price += price_data.price * weight as u128;
-                total_weight += weight;
+            match self.aggregation_method {
+                AggregationMethod::WeightedMean => {
+                    let mut total_weighted = 0u128;
+                    let mut total_weight = 0u32;
+                    for p in &filtered {
+                        let w = self.get_source_weight(&p.source)?;
+                        total_weighted += p.price * w as u128;
+                        total_weight += w;
+                    }
+                    if total_weight == 0 {
+                        return Err(OracleError::InvalidParameters);
+                    }
+                    Ok(total_weighted / total_weight as u128)
+                }
+                AggregationMethod::Median => {
+                    let mut sorted: Vec<u128> = filtered.iter().map(|p| p.price).collect();
+                    sorted.sort();
+                    let len = sorted.len();
+                    if len % 2 == 0 {
+                        Ok((sorted[len / 2 - 1] + sorted[len / 2]) / 2)
+                    } else {
+                        Ok(sorted[len / 2])
+                    }
+                }
+                AggregationMethod::TrimmedMean(trim_count) => {
+                    let mut sorted: Vec<u128> = filtered.iter().map(|p| p.price).collect();
+                    sorted.sort();
+                    let trim = (trim_count as usize).min(sorted.len() / 3);
+                    let trimmed = &sorted[trim..sorted.len() - trim];
+                    if trimmed.is_empty() {
+                        return Err(OracleError::InsufficientSources);
+                    }
+                    let sum: u128 = trimmed.iter().sum();
+                    Ok(sum / trimmed.len() as u128)
+                }
             }
-
-            if total_weight == 0 {
-                return Err(OracleError::InvalidParameters);
-            }
-
-            Ok(total_weighted_price / total_weight as u128)
         }
 
         pub fn filter_outliers(&self, prices: &[PriceData]) -> Vec<PriceData> {
