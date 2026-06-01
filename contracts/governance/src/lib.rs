@@ -34,6 +34,17 @@ mod governance {
     }
 
     #[ink(event)]
+    pub struct QuadraticVoteCast {
+        #[ink(topic)]
+        pub proposal_id: u64,
+        #[ink(topic)]
+        pub voter: AccountId,
+        pub support: bool,
+        pub credits_spent: u32,
+        pub voting_weight: u32,
+    }
+
+    #[ink(event)]
     pub struct ProposalExecuted {
         #[ink(topic)]
         pub proposal_id: u64,
@@ -101,6 +112,11 @@ mod governance {
         delegated_power: Mapping<AccountId, u32>,
         /// Delegation expiry: (delegator, delegate) -> expiry block
         delegation_expiry: Mapping<(AccountId, AccountId), u64>,
+        // ── Quadratic Voting (Issue #229) ─────────────────────────────────────
+        /// Credit budget per signer (default 100)
+        signer_credits: Mapping<AccountId, u32>,
+        /// Credits already used on a specific proposal: (proposal_id, voter) -> credits
+        used_credits: Mapping<(u64, AccountId), u32>,
     }
 
     // =========================================================================
@@ -140,6 +156,8 @@ mod governance {
                 governance_delegations: Mapping::default(),
                 delegated_power: Mapping::default(),
                 delegation_expiry: Mapping::default(),
+                signer_credits: Mapping::default(),
+                used_credits: Mapping::default(),
             }
         }
 
@@ -502,6 +520,150 @@ mod governance {
             });
 
             Ok(())
+        }
+
+        // ── Quadratic Voting (Issue #229) ────────────────────────────────────
+
+        /// Cast a quadratic vote on an active proposal.
+        /// Credits determine voting weight: effective_weight = sqrt(credits_to_spend).
+        /// Cost increases quadratically: weight² credits spent for weight votes.
+        #[ink(message)]
+        pub fn quadratic_vote(
+            &mut self,
+            proposal_id: u64,
+            support: bool,
+            credits_to_spend: u32,
+        ) -> Result<u32, Error> {
+            let caller = self.env().caller();
+            self.ensure_signer(caller)?;
+
+            let mut proposal = self
+                .proposals
+                .get(proposal_id)
+                .ok_or(Error::ProposalNotFound)?;
+
+            if proposal.status != ProposalStatus::Active {
+                return Err(Error::ProposalClosed);
+            }
+
+            // Get or initialize credits for this signer
+            let total_credits = self.signer_credits.get(&caller).unwrap_or(100);
+            let already_used = self.used_credits.get(&(proposal_id, caller)).unwrap_or(0);
+            let remaining = total_credits.saturating_sub(already_used);
+
+            if credits_to_spend > remaining {
+                return Err(Error::InvalidThreshold);
+            }
+
+            // Calculate voting weight = floor(sqrt(credits_to_spend))
+            let voting_weight = Self::integer_sqrt(credits_to_spend as u128) as u32;
+            if voting_weight == 0 && credits_to_spend > 0 {
+                return Err(Error::InvalidThreshold);
+            }
+
+            // Update used credits
+            let new_used = already_used.saturating_add(credits_to_spend);
+            self.used_credits.insert(&(proposal_id, caller), &new_used);
+
+            // Track previous votes to avoid double-counting
+            let existing_key = (proposal_id, caller);
+            if !self.votes.contains(existing_key) {
+                // First time voting on this proposal
+                self.votes.insert(existing_key, &support);
+                if support {
+                    proposal.votes_for = proposal.votes_for.saturating_add(voting_weight);
+                } else {
+                    proposal.votes_against = proposal.votes_against.saturating_add(voting_weight);
+                }
+            } else {
+                // Add additional weight
+                if support {
+                    proposal.votes_for = proposal.votes_for.saturating_add(voting_weight);
+                } else {
+                    proposal.votes_against = proposal.votes_against.saturating_add(voting_weight);
+                }
+            }
+
+            // Check if threshold reached
+            if proposal.votes_for >= proposal.threshold {
+                let now = self.env().block_number() as u64;
+                proposal.status = ProposalStatus::Approved;
+                if proposal.is_emergency {
+                    proposal.timelock_until = now;
+                } else {
+                    proposal.timelock_until = now.saturating_add(self.timelock_blocks);
+                }
+                self.active_proposal_count = self.active_proposal_count.saturating_sub(1);
+            }
+
+            // Check if rejection is certain
+            let total_signers = self.signers.len() as u32;
+            let total_votes = proposal.votes_for.saturating_add(proposal.votes_against);
+            let remaining_signers = total_signers.saturating_sub(1); // Approx remaining
+            if proposal.votes_for.saturating_add(remaining_signers * 100) < proposal.threshold {
+                // Rough check: even if all remaining signers max out, can't reach threshold
+                proposal.status = ProposalStatus::Rejected;
+                self.active_proposal_count = self.active_proposal_count.saturating_sub(1);
+                self.env().emit_event(ProposalRejected { proposal_id });
+            }
+
+            self.proposals.insert(proposal_id, &proposal);
+
+            self.env().emit_event(QuadraticVoteCast {
+                proposal_id,
+                voter: caller,
+                support,
+                credits_spent: credits_to_spend,
+                voting_weight,
+            });
+
+            Ok(voting_weight)
+        }
+
+        /// Returns the total credit budget for a signer.
+        #[ink(message)]
+        pub fn get_signer_credits(&self, signer: AccountId) -> u32 {
+            self.signer_credits.get(&signer).unwrap_or(100)
+        }
+
+        /// Returns the credits already used on a specific proposal by a voter.
+        #[ink(message)]
+        pub fn get_used_credits(&self, proposal_id: u64, voter: AccountId) -> u32 {
+            self.used_credits.get(&(proposal_id, voter)).unwrap_or(0)
+        }
+
+        /// Returns the remaining credits for a signer on a specific proposal.
+        #[ink(message)]
+        pub fn get_remaining_credits(&self, proposal_id: u64, voter: AccountId) -> u32 {
+            let total = self.signer_credits.get(&voter).unwrap_or(100);
+            let used = self.used_credits.get(&(proposal_id, voter)).unwrap_or(0);
+            total.saturating_sub(used)
+        }
+
+        /// Admin: set the credit budget for a signer.
+        #[ink(message)]
+        pub fn set_signer_credits(&mut self, signer: AccountId, credits: u32) -> Result<(), Error> {
+            self.ensure_admin()?;
+            if credits == 0 {
+                return Err(Error::InvalidThreshold);
+            }
+            self.signer_credits.insert(&signer, &credits);
+            Ok(())
+        }
+
+        /// Integer square root (floor) for quadratic voting calculation.
+        /// Uses Newton-Raphson method in no_std environment.
+        fn integer_sqrt(value: u128) -> u128 {
+            if value < 2 {
+                return value;
+            }
+            let mut x = value;
+            let mut y = (x + 1) / 2;
+            while y < x {
+                x = y;
+                y = (x + value / x) / 2;
+            }
+            x
         }
 
         // ── Delegation Messages (Issue #231) ─────────────────────────────────
