@@ -68,18 +68,10 @@ mod propchain_escrow {
         very_large_transfer_threshold: u128,
         /// Tax compliance contract address
         tax_compliance_contract: Option<AccountId>,
-
-        // ── Escrow Participant Rating (Issue #216) ───────────────────────────
-        /// All ratings given: (rated_participant, rating_id) -> ParticipantRating
-        ratings: Mapping<(AccountId, u64), ParticipantRating>,
-        /// Rating counter per participant
-        rating_counters: Mapping<AccountId, u64>,
-        /// Escrow ratings: escrow_id -> Vec<ParticipantRating>
-        escrow_ratings: Mapping<u64, Vec<ParticipantRating>>,
-        /// Ratings given by a rater: (rater, rating_id) -> bool
-        rater_ratings: Mapping<(AccountId, u64), bool>,
-        /// Rater rating counter
-        rater_rating_counter: u64,
+        /// Escrow fee rate in basis points (e.g. 100 = 1%)
+        fee_rate_bps: u16,
+        /// Fee recipient account
+        fee_recipient: Option<AccountId>,
     }
 
     // Events
@@ -107,6 +99,15 @@ mod propchain_escrow {
         escrow_id: u64,
         amount: u128,
         recipient: AccountId,
+    }
+
+    #[ink(event)]
+    pub struct FundsPartiallyReleased {
+        #[ink(topic)]
+        escrow_id: u64,
+        amount: u128,
+        recipient: AccountId,
+        remaining: u128,
     }
 
     #[ink(event)]
@@ -178,6 +179,32 @@ mod propchain_escrow {
         #[ink(topic)]
         escrow_id: u64,
         admin: AccountId,
+    }
+
+    #[ink(event)]
+    pub struct FeeCollected {
+        #[ink(topic)]
+        escrow_id: u64,
+        #[ink(topic)]
+        fee_recipient: AccountId,
+        fee_amount: u128,
+        fee_rate_bps: u16,
+    }
+
+    #[ink(event)]
+    pub struct FeeRateUpdated {
+        #[ink(topic)]
+        updated_by: AccountId,
+        old_rate: u16,
+        new_rate: u16,
+    }
+
+    #[ink(event)]
+    pub struct FeeRecipientUpdated {
+        #[ink(topic)]
+        updated_by: AccountId,
+        old_recipient: Option<AccountId>,
+        new_recipient: Option<AccountId>,
     }
 
     // ── Large-Transfer Multi-Step Approval Events ────────────────────────────
@@ -271,12 +298,8 @@ mod propchain_escrow {
                 large_transfer_threshold: 0,
                 very_large_transfer_threshold: 0,
                 tax_compliance_contract,
-                // Rating defaults (Issue #216)
-                ratings: Mapping::default(),
-                rating_counters: Mapping::default(),
-                escrow_ratings: Mapping::default(),
-                rater_ratings: Mapping::default(),
-                rater_rating_counter: 0,
+                fee_rate_bps: 0,
+                fee_recipient: None,
             }
         }
 
@@ -320,6 +343,7 @@ mod propchain_escrow {
                 release_time_lock,
                 participants: participants.clone(),
                 jurisdiction,
+                total_released: 0,
             };
 
             self.escrows.insert(&escrow_id, &escrow_data);
@@ -490,6 +514,30 @@ mod propchain_escrow {
                 }
                 // ── End Tax Withholding ──────────────────────────────────────
 
+                // ── Fee Deduction ───────────────────────────────────────────
+                let fee = if self.fee_rate_bps > 0 && self.fee_recipient.is_some() {
+                    let calculated = final_transfer_amount
+                        .saturating_mul(self.fee_rate_bps as u128)
+                        / 10_000;
+                    if calculated > 0 {
+                        let recipient = self.fee_recipient.unwrap();
+                        if self.env().transfer(recipient, calculated).is_err() {
+                            return Err(Error::InvalidFeeAmount);
+                        }
+                        self.env().emit_event(FeeCollected {
+                            escrow_id,
+                            fee_recipient: recipient,
+                            fee_amount: calculated,
+                            fee_rate_bps: self.fee_rate_bps,
+                        });
+                    }
+                    calculated
+                } else {
+                    0
+                };
+                final_transfer_amount = final_transfer_amount.saturating_sub(fee);
+                // ── End Fee Deduction ───────────────────────────────────────
+
                 // Transfer remaining funds to seller
                 if self
                     .env()
@@ -516,6 +564,79 @@ mod propchain_escrow {
                     escrow_id,
                     amount: escrow.deposited_amount,
                     recipient: escrow.seller,
+                });
+
+                Ok(())
+            })
+        }
+
+        /// Release a partial amount from escrow to the seller.
+        /// The escrow remains active for any remaining balance.
+        #[ink(message)]
+        pub fn release_funds_partial(
+            &mut self,
+            escrow_id: u64,
+            amount: u128,
+        ) -> Result<(), Error> {
+            non_reentrant!(self, {
+                let caller = self.env().caller();
+                let mut escrow = self.escrows.get(&escrow_id).ok_or(Error::EscrowNotFound)?;
+
+                if escrow.status != EscrowStatus::Active {
+                    return Err(Error::InvalidStatus);
+                }
+
+                if amount == 0 || amount > escrow.deposited_amount.saturating_sub(escrow.total_released) {
+                    return Err(Error::InsufficientFunds);
+                }
+
+                // Check for active dispute
+                if let Some(dispute) = self.disputes.get(&escrow_id) {
+                    if !dispute.resolved {
+                        return Err(Error::DisputeActive);
+                    }
+                }
+
+                // Check time lock
+                if let Some(time_lock) = escrow.release_time_lock {
+                    if self.env().block_timestamp() < time_lock {
+                        return Err(Error::TimeLockActive);
+                    }
+                }
+
+                // Check multi-sig threshold
+                if !self.check_signature_threshold(escrow_id, ApprovalType::Release)? {
+                    return Err(Error::SignatureThresholdNotMet);
+                }
+
+                // Transfer the partial amount
+                if self.env().transfer(escrow.seller, amount).is_err() {
+                    return Err(Error::InsufficientFunds);
+                }
+
+                escrow.total_released = escrow.total_released.saturating_add(amount);
+
+                // If fully released, mark as Released
+                if escrow.total_released >= escrow.deposited_amount {
+                    escrow.status = EscrowStatus::Released;
+                }
+
+                self.escrows.insert(&escrow_id, &escrow);
+
+                let remaining = escrow.deposited_amount.saturating_sub(escrow.total_released);
+
+                self.add_audit_entry(
+                    escrow_id,
+                    caller,
+                    "FundsPartiallyReleased".to_string(),
+                    format!("Amount: {} to seller, remaining: {}", amount, remaining),
+                );
+
+                self.env().emit_event(FundsPartiallyReleased {
+                    escrow_id,
+                    amount,
+                    recipient: escrow.seller,
+                    remaining,
                 });
 
                 Ok(())
@@ -1435,6 +1556,38 @@ mod propchain_escrow {
             Ok(conditions.iter().all(|c| c.met))
         }
 
+        /// Returns the multi-sig status summary for an escrow:
+        /// (required_signatures, current_signatures_for_release, current_signatures_for_refund, signers)
+        #[ink(message)]
+        pub fn get_multi_sig_status(&self, escrow_id: u64) -> Result<(u8, u8, u8, Vec<AccountId>), Error> {
+            let config = self
+                .multi_sig_configs
+                .get(&escrow_id)
+                .ok_or(Error::EscrowNotFound)?;
+            let release_count = self
+                .signature_counts
+                .get(&(escrow_id, ApprovalType::Release))
+                .unwrap_or(0);
+            let refund_count = self
+                .signature_counts
+                .get(&(escrow_id, ApprovalType::Refund))
+                .unwrap_or(0);
+            Ok((
+                config.required_signatures,
+                release_count,
+                refund_count,
+                config.signers.clone(),
+            ))
+        }
+
+        /// Returns whether a specific participant has signed for a given approval type.
+        #[ink(message)]
+        pub fn has_signed(&self, escrow_id: u64, approval_type: ApprovalType, signer: AccountId) -> bool {
+            self.signatures
+                .get(&(escrow_id, approval_type, signer))
+                .unwrap_or(false)
+        }
+
         /// Set admin (deprecated — prefer request_admin_rotation + confirm_admin_rotation)
         #[ink(message)]
         pub fn set_admin(&mut self, new_admin: AccountId) -> Result<(), Error> {
@@ -1552,189 +1705,59 @@ mod propchain_escrow {
             self.min_high_value_threshold
         }
 
-        // ── Rating Messages (Issue #216) ─────────────────────────────────────
+        // ── Fee Configuration Messages ──────────────────────────────────────
 
-        /// Rate a participant after an escrow transaction.
-        ///
-        /// Only the buyer or seller of a completed (Released/Refunded) escrow
-        /// can rate their counterparty. Score must be 1-5.
+        /// Set the escrow fee rate (admin only). Rate is in basis points, max 1000 (10%).
         #[ink(message)]
-        pub fn rate_participant(
-            &mut self,
-            escrow_id: u64,
-            participant: AccountId,
-            score: u8,
-            comment: Option<String>,
-        ) -> Result<u64, Error> {
-            let caller = self.env().caller();
-            let escrow = self.escrows.get(&escrow_id).ok_or(Error::EscrowNotFound)?;
-
-            // Only released or refunded escrows can be rated
-            if escrow.status != EscrowStatus::Released && escrow.status != EscrowStatus::Refunded {
-                return Err(Error::InvalidStatus);
-            }
-
-            // Only buyer or seller can rate
-            if caller != escrow.buyer && caller != escrow.seller {
+        pub fn set_fee_rate(&mut self, rate_bps: u16) -> Result<(), Error> {
+            if self.env().caller() != self.admin {
                 return Err(Error::Unauthorized);
             }
-
-            // Can only rate the counterparty
-            if caller == escrow.buyer && participant != escrow.seller {
-                return Err(Error::Unauthorized);
+            if rate_bps > 1000 {
+                return Err(Error::FeeRateTooHigh);
             }
-            if caller == escrow.seller && participant != escrow.buyer {
-                return Err(Error::Unauthorized);
-            }
-
-            // Validate score
-            if score < 1 || score > 5 {
-                return Err(Error::InvalidConfiguration);
-            }
-
-            // Generate rating ID
-            let mut rating_counter = self.rating_counters.get(&participant).unwrap_or(0);
-            rating_counter += 1;
-            self.rating_counters.insert(&participant, &rating_counter);
-
-            let rating = ParticipantRating {
-                participant,
-                rater: caller,
-                escrow_id,
-                score,
-                comment,
-                rated_at: self.env().block_timestamp(),
-            };
-
-            // Store rating
-            self.ratings.insert(&(participant, rating_counter), &rating);
-
-            // Track escrow ratings
-            let mut e_ratings = self.escrow_ratings.get(&escrow_id).unwrap_or_default();
-            e_ratings.push(rating);
-            self.escrow_ratings.insert(&escrow_id, &e_ratings);
-
-            // Track rater
-            self.rater_rating_counter += 1;
-            self.rater_ratings
-                .insert(&(caller, self.rater_rating_counter), &true);
-
-            // Add audit entry
-            self.add_audit_entry(
-                escrow_id,
-                caller,
-                "ParticipantRated".to_string(),
-                format!("Participant: {:?}, Score: {}", participant, score),
-            );
-
-            self.env().emit_event(ParticipantRated {
-                escrow_id,
-                rater: caller,
-                participant,
-                score,
-                rating_id: rating_counter,
+            let old_rate = self.fee_rate_bps;
+            self.fee_rate_bps = rate_bps;
+            self.env().emit_event(FeeRateUpdated {
+                updated_by: self.env().caller(),
+                old_rate,
+                new_rate: rate_bps,
             });
-
-            Ok(rating_counter)
+            Ok(())
         }
 
-        /// Get a specific rating for a participant.
+        /// Set the fee recipient account (admin only).
         #[ink(message)]
-        pub fn get_rating(&self, participant: AccountId, rating_id: u64) -> Option<ParticipantRating> {
-            self.ratings.get(&(participant, rating_id))
+        pub fn set_fee_recipient(&mut self, recipient: Option<AccountId>) -> Result<(), Error> {
+            if self.env().caller() != self.admin {
+                return Err(Error::Unauthorized);
+            }
+            let old_recipient = self.fee_recipient;
+            self.fee_recipient = recipient;
+            self.env().emit_event(FeeRecipientUpdated {
+                updated_by: self.env().caller(),
+                old_recipient,
+                new_recipient: recipient,
+            });
+            Ok(())
         }
 
-        /// Get all ratings for a participant (paginated).
+        /// Get the current fee configuration.
         #[ink(message)]
-        pub fn get_participant_ratings(
-            &self,
-            participant: AccountId,
-            offset: u32,
-            limit: u32,
-        ) -> Vec<ParticipantRating> {
-            let total = self.rating_counters.get(&participant).unwrap_or(0);
-            let start = (offset as u64).saturating_add(1);
-            let end = total.saturating_sub(offset as u64);
-            let count = limit as u64;
-
-            let mut results = Vec::new();
-            let mut remaining = count;
-            let mut id = end;
-            while remaining > 0 && id > 0 {
-                if let Some(rating) = self.ratings.get(&(participant, id)) {
-                    results.push(rating);
-                    remaining -= 1;
-                }
-                id -= 1;
-            }
-            results
+        pub fn get_fee_config(&self) -> (u16, Option<AccountId>) {
+            (self.fee_rate_bps, self.fee_recipient)
         }
 
-        /// Get aggregated rating summary for a participant.
+        /// Calculate the fee for a given amount using the current fee rate.
         #[ink(message)]
-        pub fn get_participant_rating_summary(&self, participant: AccountId) -> RatingSummary {
-            let total = self.rating_counters.get(&participant).unwrap_or(0);
-            if total == 0 {
-                return RatingSummary {
-                    total_ratings: 0,
-                    average_score_bps: 0,
-                    score_distribution: [0; 5],
-                    transactions_as_buyer: 0,
-                    transactions_as_seller: 0,
-                    reliability_score: 0,
-                };
+        pub fn calculate_fee(&self, amount: u128) -> Result<u128, Error> {
+            if self.fee_rate_bps == 0 || self.fee_recipient.is_none() {
+                return Ok(0);
             }
-
-            let mut total_score: u64 = 0;
-            let mut distribution = [0u32; 5];
-
-            for id in 1..=total {
-                if let Some(rating) = self.ratings.get(&(participant, id)) {
-                    let idx = (rating.score.saturating_sub(1)) as usize;
-                    if idx < 5 {
-                        distribution[idx] += 1;
-                    }
-                    total_score += rating.score as u64;
-                }
-            }
-
-            let average_score_bps = (total_score * 1000 / total as u64) as u32;
-
-            // Calculate reliability score (0-1000) based on rating consistency.
-            // Uses integer arithmetic: sum absolute deviations from average
-            // in basis points, then map to 0-1000 scale (lower deviation = higher score).
-            let avg_bps = average_score_bps as u64; // average * 1000
-            let mut total_deviation_bps: u64 = 0;
-            for id in 1..=total {
-                if let Some(rating) = self.ratings.get(&(participant, id)) {
-                    let score_bps = (rating.score as u64) * 1000;
-                    let deviation = if score_bps > avg_bps {
-                        score_bps - avg_bps
-                    } else {
-                        avg_bps - score_bps
-                    };
-                    total_deviation_bps = total_deviation_bps.saturating_add(deviation);
-                }
-            }
-            let avg_deviation_bps = total_deviation_bps / total as u64;
-            // Max possible avg deviation: (5 - 1) * 1000 / 2 = 2000 bps
-            // Score: 1000 - (avg_deviation_bps * 500 / 1000), capped at [0, 1000]
-            let reliability_score = (1000u32).saturating_sub((avg_deviation_bps * 500 / 1000) as u32);
-
-            RatingSummary {
-                total_ratings: total as u32,
-                average_score_bps,
-                score_distribution: distribution,
-                transactions_as_buyer: 0, // Would need on-chain tracking
-                transactions_as_seller: 0, // Would need on-chain tracking
-                reliability_score,
-            }
-        }
-
-        /// Get ratings for a specific escrow.
-        #[ink(message)]
-        pub fn get_escrow_ratings(&self, escrow_id: u64) -> Vec<ParticipantRating> {
-            self.escrow_ratings.get(&escrow_id).unwrap_or_default()
+            let fee = amount
+                .saturating_mul(self.fee_rate_bps as u128)
+                / 10_000;
+            Ok(fee)
         }
 
         // Helper functions
