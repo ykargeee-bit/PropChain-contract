@@ -96,6 +96,22 @@ mod propchain_oracle {
         multisig_proposals: Mapping<u64, MultiSigProposal>,
         /// Counter for generating unique proposal ids.
         multisig_proposal_counter: u64,
+
+        // ── Data Verification (Issue #221) ────────────────────────────────────
+        /// Verification requests: request_id -> DataVerificationRequest
+        verification_requests: Mapping<u64, DataVerificationRequest>,
+        /// Verification proofs: request_id -> vec of VerificationProof
+        verification_proofs: Mapping<u64, Vec<VerificationProof>>,
+        /// Counter for verification request IDs
+        verification_counter: u64,
+
+        // ── Fallback Mechanism (Issue #220) ────────────────────────────────────
+        /// Fallback configuration
+        fallback_config: FallbackConfig,
+        /// Ordered list of fallback source IDs
+        fallback_source_ids: Vec<String>,
+        /// Fallback sources: source_id -> FallbackSource
+        fallback_sources: Mapping<String, FallbackSource>,
     }
 
     /// A pending multi-sig proposal for a critical oracle operation.
@@ -181,6 +197,74 @@ mod propchain_oracle {
         proposal_id: u64,
     }
 
+    // ── Data Verification Events (Issue #221) ──────────────────────────────
+
+    /// Emitted when a data verification request is created.
+    #[ink(event)]
+    pub struct VerificationRequested {
+        #[ink(topic)]
+        request_id: u64,
+        #[ink(topic)]
+        source_id: String,
+        property_id: u64,
+        reported_price: u128,
+        submitter: AccountId,
+        deadline: u64,
+    }
+
+    /// Emitted when a verification proof is submitted.
+    #[ink(event)]
+    pub struct VerificationProofSubmitted {
+        #[ink(topic)]
+        request_id: u64,
+        verifier: AccountId,
+        proof_type: String,
+    }
+
+    /// Emitted when verification completes.
+    #[ink(event)]
+    pub struct VerificationCompleted {
+        #[ink(topic)]
+        request_id: u64,
+        status: VerificationStatus,
+        proof_count: u32,
+    }
+
+    // ── Fallback Mechanism Events (Issue #220) ─────────────────────────────
+
+    /// Emitted when the fallback configuration is updated.
+    #[ink(event)]
+    pub struct FallbackConfigUpdated {
+        enabled: bool,
+        fallback_delay_blocks: u32,
+        max_fallback_attempts: u32,
+    }
+
+    /// Emitted when a fallback source is added.
+    #[ink(event)]
+    pub struct FallbackSourceAdded {
+        #[ink(topic)]
+        source_id: String,
+        priority: u32,
+    }
+
+    /// Emitted when a fallback source is removed.
+    #[ink(event)]
+    pub struct FallbackSourceRemoved {
+        #[ink(topic)]
+        source_id: String,
+    }
+
+    /// Emitted when fallback is triggered for a primary source failure.
+    #[ink(event)]
+    pub struct FallbackTriggered {
+        #[ink(topic)]
+        primary_source_id: String,
+        fallback_source_id: String,
+        property_id: u64,
+        attempts: u32,
+    }
+
     include!("types.rs");
 
     impl PropertyValuationOracle {
@@ -231,6 +315,14 @@ mod propchain_oracle {
                 multisig_threshold: 1,
                 multisig_proposals: Mapping::default(),
                 multisig_proposal_counter: 0,
+                // Data verification defaults (Issue #221)
+                verification_requests: Mapping::default(),
+                verification_proofs: Mapping::default(),
+                verification_counter: 0,
+                // Fallback mechanism defaults (Issue #220)
+                fallback_config: FallbackConfig::default(),
+                fallback_source_ids: Vec::new(),
+                fallback_sources: Mapping::default(),
             }
         }
 
@@ -745,6 +837,340 @@ mod propchain_oracle {
         #[ink(message)]
         pub fn get_ai_valuation_contract(&self) -> Option<AccountId> {
             self.ai_valuation_contract
+        }
+
+        // ── Data Verification API (Issue #221) ────────────────────────────────
+
+        /// Request data verification for an oracle source.
+        #[ink(message)]
+        pub fn request_data_verification(
+            &mut self,
+            source_id: String,
+            property_id: u64,
+            reported_price: u128,
+        ) -> Result<u64, OracleError> {
+            let caller = self.env().caller();
+
+            // Verify the source exists
+            if self.oracle_sources.get(&source_id).is_none() {
+                return Err(OracleError::OracleSourceNotFound);
+            }
+
+            let request_id = self.verification_counter;
+            self.verification_counter = self.verification_counter.saturating_add(1);
+
+            let deadline = self
+                .env()
+                .block_timestamp()
+                .saturating_add(3600_000); // 1 hour window
+
+            let request = DataVerificationRequest {
+                request_id,
+                source_id: source_id.clone(),
+                property_id,
+                reported_price,
+                submitter: caller,
+                status: VerificationStatus::Pending,
+                created_at: self.env().block_timestamp(),
+                deadline,
+            };
+
+            self.verification_requests.insert(&request_id, &request);
+
+            self.env().emit_event(VerificationRequested {
+                request_id,
+                source_id,
+                property_id,
+                reported_price,
+                submitter: caller,
+                deadline,
+            });
+
+            Ok(request_id)
+        }
+
+        /// Submit a verification proof for a data verification request.
+        #[ink(message)]
+        pub fn submit_verification_proof(
+            &mut self,
+            request_id: u64,
+            proof_type: String,
+            proof_data: Vec<u8>,
+            metadata: String,
+        ) -> Result<(), OracleError> {
+            let caller = self.env().caller();
+
+            let mut request = self
+                .verification_requests
+                .get(&request_id)
+                .ok_or(OracleError::PropertyNotFound)?;
+
+            // Ensure request is still pending/in progress
+            if request.status == VerificationStatus::Verified
+                || request.status == VerificationStatus::Failed
+                || request.status == VerificationStatus::Expired
+            {
+                return Err(OracleError::AlreadyExists);
+            }
+
+            // Update request status to in progress
+            if request.status == VerificationStatus::Pending {
+                request.status = VerificationStatus::InProgress;
+                self.verification_requests.insert(&request_id, &request);
+            }
+
+            let proof = VerificationProof {
+                request_id,
+                verifier: caller,
+                proof_type: proof_type.clone(),
+                proof_data,
+                metadata,
+                submitted_at: self.env().block_timestamp(),
+            };
+
+            let mut proofs = self.verification_proofs.get(&request_id).unwrap_or_default();
+            proofs.push(proof);
+            self.verification_proofs.insert(&request_id, &proofs);
+
+            self.env().emit_event(VerificationProofSubmitted {
+                request_id,
+                verifier: caller,
+                proof_type,
+            });
+
+            Ok(())
+        }
+
+        /// Complete a verification by resolving its status.
+        /// Only the original submitter or admin can finalise.
+        #[ink(message)]
+        pub fn resolve_verification(
+            &mut self,
+            request_id: u64,
+            status: VerificationStatus,
+        ) -> Result<(), OracleError> {
+            let caller = self.env().caller();
+
+            let mut request = self
+                .verification_requests
+                .get(&request_id)
+                .ok_or(OracleError::PropertyNotFound)?;
+
+            // Only submitter or admin can resolve
+            if caller != request.submitter {
+                self.ensure_admin()?;
+            }
+
+            request.status = status;
+            self.verification_requests.insert(&request_id, &request);
+
+            let proof_count = self
+                .verification_proofs
+                .get(&request_id)
+                .map(|p| p.len() as u32)
+                .unwrap_or(0);
+
+            self.env().emit_event(VerificationCompleted {
+                request_id,
+                status,
+                proof_count,
+            });
+
+            Ok(())
+        }
+
+        /// Get a verification request by ID.
+        #[ink(message)]
+        pub fn get_verification_request(
+            &self,
+            request_id: u64,
+        ) -> Option<DataVerificationRequest> {
+            self.verification_requests.get(&request_id)
+        }
+
+        /// Get all verification proofs for a request.
+        #[ink(message)]
+        pub fn get_verification_proofs(
+            &self,
+            request_id: u64,
+        ) -> Vec<VerificationProof> {
+            self.verification_proofs.get(&request_id).unwrap_or_default()
+        }
+
+        // ── Fallback Mechanism API (Issue #220) ───────────────────────────────
+
+        /// Update the fallback configuration (admin only).
+        #[ink(message)]
+        pub fn set_fallback_config(&mut self, config: FallbackConfig) -> Result<(), OracleError> {
+            self.ensure_admin()?;
+            self.fallback_config = config;
+            self.env().emit_event(FallbackConfigUpdated {
+                enabled: self.fallback_config.enabled,
+                fallback_delay_blocks: self.fallback_config.fallback_delay_blocks,
+                max_fallback_attempts: self.fallback_config.max_fallback_attempts,
+            });
+            Ok(())
+        }
+
+        /// Get the current fallback configuration.
+        #[ink(message)]
+        pub fn get_fallback_config(&self) -> FallbackConfig {
+            self.fallback_config.clone()
+        }
+
+        /// Add a fallback oracle source (admin only).
+        #[ink(message)]
+        pub fn add_fallback_source(&mut self, source: FallbackSource) -> Result<(), OracleError> {
+            self.ensure_admin()?;
+
+            if self.fallback_sources.get(&source.id).is_some() {
+                return Err(OracleError::AlreadyExists);
+            }
+
+            self.fallback_sources.insert(&source.id, &source);
+
+            // Maintain sorted order by priority
+            if !self.fallback_source_ids.contains(&source.id) {
+                self.fallback_source_ids.push(source.id.clone());
+                self.fallback_source_ids
+                    .sort_by(|a, b| {
+                        let pa = self
+                            .fallback_sources
+                            .get(a)
+                            .map(|s| s.priority)
+                            .unwrap_or(999);
+                        let pb = self
+                            .fallback_sources
+                            .get(b)
+                            .map(|s| s.priority)
+                            .unwrap_or(999);
+                        pa.cmp(&pb)
+                    });
+            }
+
+            self.env().emit_event(FallbackSourceAdded {
+                source_id: source.id,
+                priority: source.priority,
+            });
+
+            Ok(())
+        }
+
+        /// Remove a fallback source (admin only).
+        #[ink(message)]
+        pub fn remove_fallback_source(&mut self, source_id: String) -> Result<(), OracleError> {
+            self.ensure_admin()?;
+
+            if self.fallback_sources.get(&source_id).is_none() {
+                return Err(OracleError::OracleSourceNotFound);
+            }
+
+            self.fallback_sources.remove(&source_id);
+            self.fallback_source_ids.retain(|id| id != &source_id);
+
+            self.env().emit_event(FallbackSourceRemoved { source_id });
+
+            Ok(())
+        }
+
+        /// Query the oracle with automatic fallback support.
+        /// If the primary source fails, fallback sources are tried in priority order.
+        #[ink(message)]
+        pub fn query_with_fallback(
+            &mut self,
+            property_id: u64,
+        ) -> Result<FallbackQueryResult, OracleError> {
+            let mut attempts = 0u32;
+            let max_attempts = self.fallback_config.max_fallback_attempts;
+
+            // First try primary sources
+            match self.collect_prices_from_sources(property_id) {
+                Ok(prices) if !prices.is_empty() => {
+                    let price = self.aggregate_prices(&prices)?;
+                    return Ok(FallbackQueryResult {
+                        success: true,
+                        price,
+                        source_id: "primary".to_string(),
+                        attempts: 0,
+                        timestamp: self.env().block_timestamp(),
+                        error: String::new(),
+                    });
+                }
+                _ => {} // Fall through to fallback
+            }
+
+            // Try fallback sources in priority order
+            for source_id in &self.fallback_source_ids {
+                if attempts >= max_attempts {
+                    break;
+                }
+
+                if let Some(source) = self.fallback_sources.get(source_id) {
+                    if !source.active {
+                        continue;
+                    }
+
+                    attempts += 1;
+
+                    // In production, this would call the external fallback source
+                    // For now, try manual price lookup as the fallback mechanism
+                    match self.get_latest_manual_price(property_id) {
+                        Ok(price_data) => {
+                            // Update success count
+                            let mut updated = source.clone();
+                            updated.success_count = source.success_count.saturating_add(1);
+                            self.fallback_sources.insert(source_id, &updated);
+
+                            self.env().emit_event(FallbackTriggered {
+                                primary_source_id: "primary".to_string(),
+                                fallback_source_id: source_id.clone(),
+                                property_id,
+                                attempts,
+                            });
+
+                            return Ok(FallbackQueryResult {
+                                success: true,
+                                price: price_data.price,
+                                source_id: source_id.clone(),
+                                attempts,
+                                timestamp: self.env().block_timestamp(),
+                                error: String::new(),
+                            });
+                        }
+                        Err(_) => {
+                            // Update failure count
+                            let mut updated = source.clone();
+                            updated.failure_count = source.failure_count.saturating_add(1);
+                            self.fallback_sources.insert(source_id, &updated);
+                            continue;
+                        }
+                    }
+                }
+            }
+
+            Ok(FallbackQueryResult {
+                success: false,
+                price: 0,
+                source_id: String::new(),
+                attempts,
+                timestamp: self.env().block_timestamp(),
+                error: "All fallback sources exhausted".to_string(),
+            })
+        }
+
+        /// Get all registered fallback sources.
+        #[ink(message)]
+        pub fn get_fallback_sources(&self) -> Vec<FallbackSource> {
+            self.fallback_source_ids
+                .iter()
+                .filter_map(|id| self.fallback_sources.get(id))
+                .collect()
+        }
+
+        /// Get a specific fallback source by ID.
+        #[ink(message)]
+        pub fn get_fallback_source(&self, source_id: String) -> Option<FallbackSource> {
+            self.fallback_sources.get(&source_id)
         }
 
         /// Add oracle source (admin only)
