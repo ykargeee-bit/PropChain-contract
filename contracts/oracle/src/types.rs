@@ -75,3 +75,15 @@ pub struct GovernanceProposal {
     pub executed: bool,
     pub created_at: u64,
 }
+
+// ── Oracle Data History Tracking Types ─────────────────────────────────────────
+
+/// Minimum retention period for history data (7 days in milliseconds)
+pub const HISTORY_MIN_RETENTION_MS: u64 = 7 * 24 * 60 * 60 * 1000;
+
+/// Maximum retention period for history data (2 years in milliseconds)
+pub const HISTORY_MAX_RETENTION_MS: u64 = 730 * 24 * 60 * 60 * 1000;
+
+/// Default retention period for history data (90 days in milliseconds)
+pub const HISTORY_DEFAULT_RETENTION_MS: u64 = 90 * 24 * 60 * 60 * 1000;
+

@@ -112,6 +112,16 @@ mod propchain_oracle {
         governance_proposal_counter: u64,
         /// Governance voting power by participant
         governance_voting_power: Mapping<AccountId, u32>,
+
+        // ── Oracle Data History Tracking ───────────────────────────────────────
+        /// Complete oracle data snapshots per property: property_id -> Vec<OracleDataSnapshot>
+        oracle_snapshots: Mapping<u64, Vec<OracleDataSnapshot>>,
+        /// Per-source historical entries: source_id -> Vec<SourceHistoryEntry>
+        source_history: Mapping<String, Vec<SourceHistoryEntry>>,
+        /// History retention period in milliseconds
+        history_retention_ms: u64,
+        /// Flag to enable/disable history tracking
+        history_tracking_enabled: bool,
     }
 
     /// A pending multi-sig proposal for a critical oracle operation.
@@ -234,6 +244,31 @@ mod propchain_oracle {
         action: GovernanceAction,
     }
 
+    // ── Oracle Data History Tracking Events ────────────────────────────────
+
+    /// Emitted when an oracle data snapshot is recorded
+    #[ink(event)]
+    pub struct HistorySnapshotRecorded {
+        #[ink(topic)]
+        property_id: u64,
+        #[ink(topic)]
+        source_id: String,
+        valuation: u128,
+        timestamp: u64,
+        confidence_score: u32,
+    }
+
+    /// Emitted when source history is updated
+    #[ink(event)]
+    pub struct SourceHistoryUpdated {
+        #[ink(topic)]
+        source_id: String,
+        #[ink(topic)]
+        property_id: u64,
+        success: bool,
+        timestamp: u64,
+    }
+
     include!("types.rs");
 
     impl PropertyValuationOracle {
@@ -291,6 +326,11 @@ mod propchain_oracle {
                 governance_proposals: Mapping::default(),
                 governance_proposal_counter: 0,
                 governance_voting_power: Mapping::default(),
+                // History tracking defaults
+                oracle_snapshots: Mapping::default(),
+                source_history: Mapping::default(),
+                history_retention_ms: types::HISTORY_DEFAULT_RETENTION_MS,
+                history_tracking_enabled: true,
             }
         }
 
@@ -364,6 +404,24 @@ mod propchain_oracle {
 
             // Store historical valuation
             self.store_historical_valuation(property_id, valuation.clone());
+
+            // Record oracle snapshot for history tracking
+            self.record_oracle_snapshot(
+                property_id,
+                "admin_update".to_string(),
+                valuation.valuation,
+                valuation.confidence_score,
+                valuation.valuation_method.clone(),
+            );
+
+            // Record source history
+            self.record_source_history(
+                "admin_update".to_string(),
+                property_id,
+                valuation.valuation,
+                true,
+                valuation.confidence_score,
+            );
 
             // Update current valuation
             self.property_valuations.insert(&property_id, &valuation);
@@ -1857,6 +1915,297 @@ mod propchain_oracle {
         fn clear_pending_request(&mut self, property_id: u64) {
             self.pending_requests.remove(&property_id);
         }
+
+        // ────────────────────────────────────────────────────────────────────────
+        // Oracle Data History Tracking Methods
+        // ────────────────────────────────────────────────────────────────────────
+
+        /// Record an oracle data snapshot for history tracking
+        fn record_oracle_snapshot(
+            &mut self,
+            property_id: u64,
+            source_id: String,
+            valuation: u128,
+            confidence_score: u32,
+            valuation_method: ValuationMethod,
+        ) {
+            if !self.history_tracking_enabled {
+                return;
+            }
+
+            let now = self.env().block_timestamp();
+            let is_anomaly = self.detect_outliers(property_id).unwrap_or(false) > 0;
+
+            let snapshot = OracleDataSnapshot {
+                property_id,
+                source_id: source_id.clone(),
+                valuation,
+                timestamp: now,
+                confidence_score,
+                valuation_method,
+                is_anomaly,
+            };
+
+            // Get existing snapshots
+            let mut snapshots = self
+                .oracle_snapshots
+                .get(&property_id)
+                .unwrap_or_default();
+
+            // Add new snapshot
+            snapshots.push(snapshot.clone());
+
+            // Clean old snapshots based on retention period
+            let cutoff_time = now.saturating_sub(self.history_retention_ms);
+            snapshots.retain(|s| s.timestamp >= cutoff_time);
+
+            // Limit to last 1000 snapshots per property
+            if snapshots.len() > 1000 {
+                snapshots = snapshots.into_iter().skip(snapshots.len() - 1000).collect();
+            }
+
+            self.oracle_snapshots.insert(&property_id, &snapshots);
+
+            // Emit event
+            self.env().emit_event(HistorySnapshotRecorded {
+                property_id,
+                source_id: snapshot.source_id,
+                valuation,
+                timestamp: now,
+                confidence_score,
+            });
+        }
+
+        /// Record source history entry
+        fn record_source_history(
+            &mut self,
+            source_id: String,
+            property_id: u64,
+            valuation: u128,
+            success: bool,
+            confidence_score: u32,
+        ) {
+            if !self.history_tracking_enabled {
+                return;
+            }
+
+            let now = self.env().block_timestamp();
+
+            let entry = SourceHistoryEntry {
+                timestamp: now,
+                valuation,
+                property_id,
+                success,
+                confidence_score,
+                update_count: 0,
+            };
+
+            // Get existing history for this source
+            let mut history = self
+                .source_history
+                .get(&source_id)
+                .unwrap_or_default();
+
+            // Add new entry
+            history.push(entry);
+
+            // Clean old entries based on retention period
+            let cutoff_time = now.saturating_sub(self.history_retention_ms);
+            history.retain(|e| e.timestamp >= cutoff_time);
+
+            // Limit to last 5000 entries per source
+            if history.len() > 5000 {
+                history = history.into_iter().skip(history.len() - 5000).collect();
+            }
+
+            self.source_history.insert(&source_id, &history);
+
+            // Emit event
+            self.env().emit_event(SourceHistoryUpdated {
+                source_id,
+                property_id,
+                success,
+                timestamp: now,
+            });
+        }
+
+        /// Get oracle data snapshots for a property
+        #[ink(message)]
+        pub fn get_oracle_snapshots(
+            &self,
+            property_id: u64,
+            limit: u32,
+        ) -> Vec<OracleDataSnapshot> {
+            self.oracle_snapshots
+                .get(&property_id)
+                .unwrap_or_default()
+                .into_iter()
+                .rev() // Most recent first
+                .take(limit as usize)
+                .collect()
+        }
+
+        /// Get historical data within a date range
+        #[ink(message)]
+        pub fn get_history_by_date_range(
+            &self,
+            property_id: u64,
+            start_timestamp: u64,
+            end_timestamp: u64,
+        ) -> Vec<OracleDataSnapshot> {
+            self.oracle_snapshots
+                .get(&property_id)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|s| s.timestamp >= start_timestamp && s.timestamp <= end_timestamp)
+                .collect()
+        }
+
+        /// Get source history for a specific oracle source
+        #[ink(message)]
+        pub fn get_source_history(
+            &self,
+            source_id: String,
+            limit: u32,
+        ) -> Vec<SourceHistoryEntry> {
+            self.source_history
+                .get(&source_id)
+                .unwrap_or_default()
+                .into_iter()
+                .rev() // Most recent first
+                .take(limit as usize)
+                .collect()
+        }
+
+        /// Calculate statistics from historical oracle data
+        #[ink(message)]
+        pub fn get_history_statistics(
+            &self,
+            property_id: u64,
+            days_lookback: u32,
+        ) -> Result<OracleHistoryStatistics, OracleError> {
+            let snapshots = self.oracle_snapshots
+                .get(&property_id)
+                .ok_or(OracleError::PropertyNotFound)?;
+
+            if snapshots.is_empty() {
+                return Err(OracleError::PropertyNotFound);
+            }
+
+            let now = self.env().block_timestamp();
+            let lookback_ms = (days_lookback as u64) * 24 * 60 * 60 * 1000;
+            let cutoff_time = now.saturating_sub(lookback_ms);
+
+            let relevant_data: Vec<_> = snapshots
+                .iter()
+                .filter(|s| s.timestamp >= cutoff_time)
+                .collect();
+
+            if relevant_data.is_empty() {
+                return Err(OracleError::PropertyNotFound);
+            }
+
+            let mut min_valuation = u128::MAX;
+            let mut max_valuation = u128::MIN;
+            let mut sum: u128 = 0;
+
+            for snapshot in &relevant_data {
+                min_valuation = min_valuation.min(snapshot.valuation);
+                max_valuation = max_valuation.max(snapshot.valuation);
+                sum = sum.saturating_add(snapshot.valuation);
+            }
+
+            let average_valuation = sum / (relevant_data.len() as u128);
+
+            // Calculate volatility (simplified standard deviation)
+            let mut variance_sum: u128 = 0;
+            for snapshot in &relevant_data {
+                let diff = if snapshot.valuation > average_valuation {
+                    snapshot.valuation - average_valuation
+                } else {
+                    average_valuation - snapshot.valuation
+                };
+                variance_sum = variance_sum.saturating_add(diff * diff);
+            }
+
+            let variance = variance_sum / (relevant_data.len() as u128);
+            let stddev = self.sqrt(variance);
+            let volatility_percentage = if average_valuation > 0 {
+                ((stddev * 100) / average_valuation).min(100) as u32
+            } else {
+                0
+            };
+
+            let trend_direction = if relevant_data.len() > 1 {
+                let first = relevant_data.first().unwrap().valuation as i128;
+                let last = relevant_data.last().unwrap().valuation as i128;
+                ((last - first) / (relevant_data.len() as i128)).max(-100).min(100) as i32
+            } else {
+                0
+            };
+
+            let period_start = relevant_data.first().unwrap().timestamp;
+            let period_end = relevant_data.last().unwrap().timestamp;
+
+            Ok(OracleHistoryStatistics {
+                property_id,
+                min_valuation,
+                max_valuation,
+                average_valuation,
+                data_points: relevant_data.len() as u32,
+                period_start,
+                period_end,
+                volatility_percentage,
+                trend_direction,
+            })
+        }
+
+        /// Simple integer square root calculation
+        fn sqrt(&self, n: u128) -> u128 {
+            if n == 0 {
+                return 0;
+            }
+            let mut x = n;
+            let mut y = (x + 1) / 2;
+            while y < x {
+                x = y;
+                y = (x + n / x) / 2;
+            }
+            x
+        }
+
+        /// Set history tracking enabled/disabled
+        #[ink(message)]
+        pub fn set_history_tracking_enabled(&mut self, enabled: bool) -> Result<(), OracleError> {
+            self.ensure_admin()?;
+            self.history_tracking_enabled = enabled;
+            Ok(())
+        }
+
+        /// Set history retention period in milliseconds
+        #[ink(message)]
+        pub fn set_history_retention_ms(&mut self, retention_ms: u64) -> Result<(), OracleError> {
+            self.ensure_admin()?;
+            if retention_ms < types::HISTORY_MIN_RETENTION_MS
+                || retention_ms > types::HISTORY_MAX_RETENTION_MS
+            {
+                return Err(OracleError::InvalidParameters);
+            }
+            self.history_retention_ms = retention_ms;
+            Ok(())
+        }
+
+        /// Check if history tracking is enabled
+        #[ink(message)]
+        pub fn is_history_tracking_enabled(&self) -> bool {
+            self.history_tracking_enabled
+        }
+
+        /// Get current history retention period
+        #[ink(message)]
+        pub fn get_history_retention_ms(&self) -> u64 {
+            self.history_retention_ms
+        }
     }
 
     /// Implementation of the Oracle trait from propchain-traits
@@ -1904,6 +2253,43 @@ mod propchain_oracle {
             location: String,
         ) -> Result<VolatilityMetrics, OracleError> {
             self.get_market_volatility(property_type, location)
+        }
+
+        #[ink(message)]
+        fn get_oracle_snapshots(
+            &self,
+            property_id: u64,
+            limit: u32,
+        ) -> Vec<OracleDataSnapshot> {
+            self.get_oracle_snapshots(property_id, limit)
+        }
+
+        #[ink(message)]
+        fn get_source_history(
+            &self,
+            source_id: String,
+            limit: u32,
+        ) -> Vec<SourceHistoryEntry> {
+            self.get_source_history(source_id, limit)
+        }
+
+        #[ink(message)]
+        fn get_history_by_date_range(
+            &self,
+            property_id: u64,
+            start_timestamp: u64,
+            end_timestamp: u64,
+        ) -> Vec<OracleDataSnapshot> {
+            self.get_history_by_date_range(property_id, start_timestamp, end_timestamp)
+        }
+
+        #[ink(message)]
+        fn get_history_statistics(
+            &self,
+            property_id: u64,
+            days_lookback: u32,
+        ) -> Result<OracleHistoryStatistics, OracleError> {
+            self.get_history_statistics(property_id, days_lookback)
         }
     }
 
