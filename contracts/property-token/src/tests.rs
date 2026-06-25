@@ -144,6 +144,96 @@ mod tests {
         assert_eq!(contract.metadata_version_count(token_id), 0);
     }
 
+    // =========================================================================
+    // Issue #556 – mint_batch tests
+    // =========================================================================
+
+    #[ink::test]
+    fn test_mint_batch_basic() {
+        let mut contract = setup_contract();
+        let accounts = test::default_accounts::<DefaultEnvironment>();
+        test::set_caller::<DefaultEnvironment>(accounts.alice);
+
+        let uris = vec![
+            String::from("ipfs://QmProp1"),
+            String::from("ipfs://QmProp2"),
+            String::from("ipfs://QmProp3"),
+        ];
+        let result = contract.mint_batch(accounts.alice, uris);
+        assert!(result.is_ok());
+        let ids = result.unwrap();
+        assert_eq!(ids.len(), 3);
+        assert_eq!(contract.total_supply(), 3);
+    }
+
+    #[ink::test]
+    fn test_mint_batch_assigns_correct_owner() {
+        let mut contract = setup_contract();
+        let accounts = test::default_accounts::<DefaultEnvironment>();
+        test::set_caller::<DefaultEnvironment>(accounts.alice);
+
+        let uris = vec![String::from("ipfs://QmA"), String::from("ipfs://QmB")];
+        let ids = contract.mint_batch(accounts.alice, uris).unwrap();
+
+        for id in &ids {
+            assert_eq!(contract.owner_of(*id), Some(accounts.alice));
+        }
+        assert_eq!(contract.balance_of(accounts.alice), 2);
+    }
+
+    #[ink::test]
+    fn test_mint_batch_stores_uris() {
+        let mut contract = setup_contract();
+        let accounts = test::default_accounts::<DefaultEnvironment>();
+        test::set_caller::<DefaultEnvironment>(accounts.alice);
+
+        let uris = vec![String::from("ipfs://QmX"), String::from("ipfs://QmY")];
+        let ids = contract.mint_batch(accounts.alice, uris.clone()).unwrap();
+
+        for (idx, id) in ids.iter().enumerate() {
+            let stored = contract.token_uris.get(id);
+            assert_eq!(stored, Some(uris[idx].clone()));
+        }
+    }
+
+    #[ink::test]
+    fn test_mint_batch_empty_fails() {
+        let mut contract = setup_contract();
+        let accounts = test::default_accounts::<DefaultEnvironment>();
+        test::set_caller::<DefaultEnvironment>(accounts.alice);
+
+        let result = contract.mint_batch(accounts.alice, vec![]);
+        assert_eq!(result, Err(Error::InvalidAmount));
+    }
+
+    #[ink::test]
+    fn test_mint_batch_unauthorized_fails() {
+        let mut contract = setup_contract();
+        let accounts = test::default_accounts::<DefaultEnvironment>();
+
+        // Bob tries to mint tokens owned by Alice – caller must be owner or admin
+        test::set_caller::<DefaultEnvironment>(accounts.bob);
+        let result = contract.mint_batch(
+            accounts.alice,
+            vec![String::from("ipfs://QmUnauth")],
+        );
+        assert_eq!(result, Err(Error::Unauthorized));
+    }
+
+    #[ink::test]
+    fn test_mint_batch_token_ids_sequential() {
+        let mut contract = setup_contract();
+        let accounts = test::default_accounts::<DefaultEnvironment>();
+        test::set_caller::<DefaultEnvironment>(accounts.alice);
+
+        let uris = vec![
+            String::from("ipfs://QmSeq1"),
+            String::from("ipfs://QmSeq2"),
+        ];
+        let ids = contract.mint_batch(accounts.alice, uris).unwrap();
+        assert_eq!(ids[0] + 1, ids[1], "Token IDs must be sequential");
+    }
+
     fn setup_contract() -> PropertyToken {
         PropertyToken::new()
     }

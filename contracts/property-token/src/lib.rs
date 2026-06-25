@@ -561,6 +561,15 @@ pub mod property_token {
         pub reason: String,
     }
 
+    // --- Batch Mint Events (Issue #556) ---
+    #[ink(event)]
+    pub struct BatchMinted {
+        #[ink(topic)]
+        pub owner: AccountId,
+        pub token_ids: Vec<TokenId>,
+        pub count: u32,
+    }
+
     impl Default for PropertyToken {
         fn default() -> Self {
             Self::new()
@@ -2510,6 +2519,76 @@ pub mod property_token {
             self.total_supply += issued_tokens.len() as u64;
 
             Ok(issued_tokens)
+        }
+
+        /// Batch-mints multiple NFTs atomically for institutional issuers (Issue #556).
+        /// Assigns all tokens to `owner` with corresponding `metadata_uris`.
+        /// Aborts entirely if any validation fails (all-or-nothing semantics).
+        #[ink(message)]
+        pub fn mint_batch(
+            &mut self,
+            owner: AccountId,
+            metadata_uris: Vec<String>,
+        ) -> Result<Vec<TokenId>, Error> {
+            if metadata_uris.is_empty() {
+                return Err(Error::InvalidAmount);
+            }
+            if metadata_uris.len() > self.max_batch_size as usize {
+                return Err(Error::BatchSizeExceeded);
+            }
+            let caller = self.env().caller();
+            if caller != self.admin && caller != owner {
+                return Err(Error::Unauthorized);
+            }
+
+            let current_time = self.env().block_timestamp();
+            let mut issued_ids: Vec<TokenId> = Vec::new();
+
+            for uri in &metadata_uris {
+                self.token_counter += 1;
+                let token_id = self.token_counter;
+
+                self.token_owner.insert(token_id, &owner);
+                let balance = self.owner_token_count.get(owner).unwrap_or(0);
+                self.owner_token_count.insert(owner, &(balance + 1));
+                self.balances.insert((&owner, &token_id), &1u128);
+
+                if !uri.is_empty() {
+                    self.token_uris.insert(token_id, uri);
+                }
+
+                let initial_transfer = OwnershipTransfer {
+                    from: AccountId::from([0u8; 32]),
+                    to: owner,
+                    timestamp: current_time,
+                    transaction_hash: Hash::default(),
+                };
+                self.ownership_history_count.insert(token_id, &1u32);
+                self.ownership_history_items
+                    .insert((token_id, 0), &initial_transfer);
+
+                let compliance_info = ComplianceInfo {
+                    verified: false,
+                    verification_date: 0,
+                    verifier: AccountId::from([0u8; 32]),
+                    compliance_type: String::from("KYC"),
+                };
+                self.compliance_flags.insert(token_id, &compliance_info);
+                self.legal_documents_count.insert(token_id, &0u32);
+
+                issued_ids.push(token_id);
+            }
+
+            self.total_supply += issued_ids.len() as u64;
+
+            let count = issued_ids.len() as u32;
+            self.env().emit_event(BatchMinted {
+                owner,
+                token_ids: issued_ids.clone(),
+                count,
+            });
+
+            Ok(issued_ids)
         }
 
         /// Property-specific: Attaches a legal document to a token
