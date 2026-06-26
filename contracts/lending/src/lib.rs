@@ -153,8 +153,8 @@ mod propchain_lending {
         pub term_months: u32,
         pub interest_rate_bps: u32,
         pub status: LoanStatus,
-        pub loan_type: LoanType,
-        pub start_block: Option<u64>,
+        pub accrued_interest: u128,
+        pub last_interest_timestamp: u64,
     }
 
     #[derive(
@@ -771,8 +771,8 @@ mod propchain_lending {
                 term_months,
                 interest_rate_bps,
                 status: LoanStatus::Pending,
-                loan_type: LoanType::Variable,
-                start_block: None,
+                accrued_interest: 0,
+                last_interest_timestamp: 0,
             };
             self.loan_applications.insert(self.loan_count, &app);
             self.track_borrower_loan(app.applicant, self.loan_count);
@@ -817,8 +817,8 @@ mod propchain_lending {
                 term_months,
                 interest_rate_bps,
                 status: LoanStatus::Pending,
-                loan_type: LoanType::Variable,
-                start_block: None,
+                accrued_interest: 0,
+                last_interest_timestamp: 0,
             };
             self.loan_applications.insert(self.loan_count, &app);
             self.track_borrower_loan(app.applicant, self.loan_count);
@@ -854,7 +854,8 @@ mod propchain_lending {
                 profile.total_borrowed =
                     profile.total_borrowed.saturating_add(app.requested_amount);
                 self.credit_profiles.insert(app.applicant, &profile);
-                app.start_block = Some(self.env().block_number() as u64);
+                app.accrued_interest = 0;
+                app.last_interest_timestamp = self.env().block_timestamp();
                 LoanStatus::Active
             } else {
                 LoanStatus::Pending
@@ -1050,9 +1051,11 @@ mod propchain_lending {
 
             let approved = restructuring.borrower_approved && restructuring.lender_approved;
             if approved {
+                self.update_interest_snapshot(loan_id)?;
                 app.term_months = restructuring.proposed_term_months;
                 app.interest_rate_bps = restructuring.proposed_interest_rate_bps;
                 app.status = LoanStatus::Restructured;
+                app.last_interest_timestamp = self.env().block_timestamp();
                 self.loan_applications.insert(loan_id, &app);
                 self.loan_restructurings.remove(loan_id);
                 self.env().emit_event(LoanRestructured {
@@ -1082,6 +1085,8 @@ mod propchain_lending {
             if app.status != LoanStatus::Active {
                 return Err(LendingError::LoanNotActive);
             }
+
+            self.update_interest_snapshot(loan_id)?;
 
             let record = self
                 .collateral_records
@@ -1436,8 +1441,8 @@ mod propchain_lending {
                 term_months: offer.term_months,
                 interest_rate_bps: offer.rate_bps,
                 status: LoanStatus::Active,
-                loan_type: LoanType::Variable,
-                start_block: Some(self.env().block_number() as u64),
+                accrued_interest: 0,
+                last_interest_timestamp: self.env().block_timestamp(),
             };
 
             self.loan_applications.insert(loan_id, &loan);
@@ -1641,6 +1646,49 @@ mod propchain_lending {
             let mut loan_ids = self.borrower_loans.get(borrower).unwrap_or_default();
             loan_ids.push(loan_id);
             self.borrower_loans.insert(borrower, &loan_ids);
+        }
+
+        fn compute_accrued_interest(
+            principal: u128,
+            rate_bps: u32,
+            elapsed_seconds: u64,
+        ) -> u128 {
+            if principal == 0 || rate_bps == 0 || elapsed_seconds == 0 {
+                return 0;
+            }
+            principal
+                .saturating_mul(rate_bps as u128)
+                .saturating_mul(elapsed_seconds as u128)
+                / 10000u128
+                / 31_536_000u128
+        }
+
+        fn update_interest_snapshot(&mut self, loan_id: u64) -> Result<(), LendingError> {
+            let mut loan = self
+                .loan_applications
+                .get(loan_id)
+                .ok_or(LendingError::LoanNotFound)?;
+
+            if loan.last_interest_timestamp == 0 {
+                loan.last_interest_timestamp = self.env().block_timestamp();
+                self.loan_applications.insert(loan_id, &loan);
+                return Ok(());
+            }
+
+            let current_timestamp = self.env().block_timestamp();
+            if current_timestamp <= loan.last_interest_timestamp {
+                return Ok(());
+            }
+
+            let accrued = Self::compute_accrued_interest(
+                loan.requested_amount,
+                loan.interest_rate_bps,
+                current_timestamp.saturating_sub(loan.last_interest_timestamp),
+            );
+            loan.accrued_interest = loan.accrued_interest.saturating_add(accrued);
+            loan.last_interest_timestamp = current_timestamp;
+            self.loan_applications.insert(loan_id, &loan);
+            Ok(())
         }
     }
 
@@ -2119,3 +2167,11 @@ mod lending_admin_rotation_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "test.rs"]
+mod lending_regression_test;
+
+#[cfg(test)]
+#[path = "test.rs"]
+mod lending_regression_test;
