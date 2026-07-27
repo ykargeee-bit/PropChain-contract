@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["InsuranceError"],"mod":["submodules"],"struct":["PropertyInsurance"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["OracleError","OracleSourceType","ValuationMethod"],"struct":["ComparableProperty","LocationAdjustment","MarketTrend","OracleDataSnapshot","OracleHistoryStatistics","OracleSource","PriceAlert","PriceData","PropertyValuation","SourceHistoryEntry","ValuationWithConfidence","VolatilityMetrics"],"trait":["Oracle","OracleRegistry"]};
