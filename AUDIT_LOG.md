@@ -1,5 +1,5 @@
 # 🛡️ Automated Security & Mutation Audit Log
-Generated on: Sun Nov 22 09:33:09 UTC 2026
+Generated on: Mon Nov 23 10:31:20 UTC 2026
 ---
 ## 📦 Dependency License & Advisory Checks (cargo-deny)
 ```text
@@ -140,6 +140,14 @@ cargo-deny failed or flagged warnings
 [0m[0m[1m[31mURL:      [0m https://rustsec.org/advisories/RUSTSEC-2026-0344
 [0m[0m[1m[31mSeverity: [0m 7.5 (high)
 [0m[0m[1m[31mSolution: [0m Upgrade to >=0.9.1
+
+[0m[0m[1m[31mCrate:    [0m url
+[0m[0m[1m[31mVersion:  [0m 2.5.8
+[0m[0m[1m[31mTitle:    [0m Stack overflow in `Url::origin()` on nested `blob:` URLs
+[0m[0m[1m[31mDate:     [0m 2026-11-20
+[0m[0m[1m[31mID:       [0m RUSTSEC-2026-0592
+[0m[0m[1m[31mURL:      [0m https://rustsec.org/advisories/RUSTSEC-2026-0592
+[0m[0m[1m[31mSolution: [0m Upgrade to >=2.5.9
 
 [0m[0m[1m[31mCrate:    [0m zip
 [0m[0m[1m[31mVersion:  [0m 2.3.0
